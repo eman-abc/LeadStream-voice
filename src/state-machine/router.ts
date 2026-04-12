@@ -29,14 +29,18 @@ const CONTACT_PATTERNS = [
 
 // Farewell patterns — caller is done
 const FAREWELL_PATTERNS = [
-    /^no[,.]?\s*(that'?s?\s*all)?\\.?$/i,
-    /^(nope|nah|no thanks)\\.?$/i,
+    /^no[,.]?\s*(that'?s?\s*all)?\.?$/i,
+    /^(nope|nah|no thanks)\.?$/i,
     /that'?s all/i,
     /goodbye/i,
     /^bye/i,
-    /thank you.*time/i,
+    /thank you/i,
     /nothing else/i,
+    /all set/i,
     /i'?m\s*(good|all set|done)/i,
+    /have a great/i,
+    /okay.*thank/i,
+    /alright.*thank/i,
 ];
 
 /**
@@ -115,34 +119,26 @@ async function handleRouting(transcript, currentState, entityContext, history) {
 
         case CallStateEnum.DATA_COLLECTION: {
             const isContactInfo = CONTACT_PATTERNS.some((p) => p.test(transcript));
-            const next = detectNextState(lower);
 
             if (isContactInfo) {
+                // We received name/email — confirm and move to close
+                const confirmLine = hasEmail
+                    ? `Perfect, I've got your details. A solutions architect will be in touch at ${entityContext.email}. Is there anything else I can help you with?`
+                    : "Perfect, I've got your details! A solutions architect will be in touch shortly. Is there anything else I can help you with?";
                 return {
-                    content:
-                        "Perfect, I've got your details! A solutions architect will be in touch shortly. " +
-                        "Is there anything else I can help you with?",
+                    content: confirmLine,
                     nextState: CallStateEnum.CONFIRM_CLOSE,
                     redlined: false,
                 };
             }
 
-            if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript, history, entityContext);
-                const suffix = !hasAllEntities ? " Now, could I grab your name and email to get you booked in?" : "";
-                return {
-                    content: groqResponse + suffix,
-                    nextState: CallStateEnum.DATA_COLLECTION,
-                    redlined: false,
-                };
-            }
-
-            // Ambiguous — assume contact info received
+            // For anything else, let Groq handle it with full context.
+            // The entity-aware system prompt tells Alex what she's still missing
+            // and she'll ask for it naturally — no mechanical string injection.
+            const groqResponse = await queryGroq(transcript, history, entityContext);
             return {
-                content:
-                    "Got it, thank you! A solutions architect will reach out to you shortly. " +
-                    "Is there anything else I can help you with?",
-                nextState: CallStateEnum.CONFIRM_CLOSE,
+                content: groqResponse,
+                nextState: CallStateEnum.DATA_COLLECTION,
                 redlined: false,
             };
         }
