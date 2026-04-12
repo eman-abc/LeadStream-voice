@@ -2,15 +2,13 @@
 
 const { Router } = require('express');
 const rateLimit = require('express-rate-limit');
-const Groq = require("groq-sdk");
-
-// Services & Utils
+const Groq = require("groq-sdk"); // Hoisted import
 const { handleRouting: routingHandler } = require("../state-machine/router");
 const { CallState: CallStateMap } = require("../types");
-const { parseEndOfCallReport, extractName, extractEmail } = require("../services/leadParser");
+const { parseEndOfCallReport } = require("../services/leadParser");
 const { dispatchLead } = require("../services/crmMock");
-const { sendFollowUpEmail } = require("../services/mailService");
 const { pushEvent } = require("../ws/broadcaster");
+const { sendFollowUpEmail } = require("../services/mailService"); // Added missing import
 const logger = require("../utils/logger");
 
 const router = Router();
@@ -18,9 +16,6 @@ const router = Router();
 // Constant Configuration
 const VAPI_SECRET = process.env.VAPI_SECRET;
 const SESSION_EXPIRY_MS = 60 * 60 * 1000; // 1 Hour Safety Reaper
-
-// Initialize LLM once globally
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Rate Limiter — prevent DoS on webhook endpoint
 const webhookLimiter = rateLimit({
@@ -30,22 +25,26 @@ const webhookLimiter = rateLimit({
 });
 router.use('/webhook', webhookLimiter);
 
-// --- In-Memory State Managers ---
 /** @type {Record<string, string>} */
 const callStateMap = {};
+
 /** @type {Record<string, string>} - Stores last response per call to detect echo */
 const lastResponseMap = {};
+
 /** @type {Record<string, {name: string, email: string}>} - Known entities per call */
 const entityMap = {};
+
 /** @type {Record<string, Array<{role: string, content: string}>>} - Full conversation history per call */
 const conversationHistoryMap = {};
+
 /** @type {Record<string, NodeJS.Timeout>} - Safety reapers for abandoned sessions */
 const sessionReapers = {};
+
 /** @type {Set<string>} - Tracks already-processed toolCallIds */
 const processedToolCalls = new Set();
 
 /**
- * Ensures no memory leaks when a call ends or is abandoned
+ * cleanUpSession - Ensure no memory leaks when a call ends or is abandoned
  * @param {string} callId 
  */
 function cleanUpSession(callId) {
@@ -57,10 +56,10 @@ function cleanUpSession(callId) {
     delete lastResponseMap[callId];
     delete entityMap[callId];
     delete conversationHistoryMap[callId];
-    logger.info("Session cleaned up", { callId });
+    logger.info(`Session cleaned up`, { callId });
 }
 
-// Events we acknowledge immediately without processing logic
+// Events we acknowledge immediately
 const PASSTHROUGH_EVENTS = new Set([
     "assistant.started",
     "assistant.speechStarted",
@@ -84,98 +83,115 @@ router.post('/webhook', async (req, res) => {
     const body = req.body || {};
     const message = body.message || {};
     const messageType = message.type || body.type || "";
+
     const callId = body.call?.id || message.call?.id || body.callId || "default";
 
-    // Step 1: Passthrough events
+    // Step 1: passthrough events
     if (PASSTHROUGH_EVENTS.has(messageType)) {
         return res.status(200).json({ received: true });
     }
 
-    // Step 2: Initialize or Reset Safety Reaper for this call
+    // Initialize or Reset Safety Reaper for this call
     if (callId !== "default") {
         if (sessionReapers[callId]) clearTimeout(sessionReapers[callId]);
         sessionReapers[callId] = setTimeout(() => cleanUpSession(callId), SESSION_EXPIRY_MS);
     }
 
-    // Step 3: End-of-call cleanup & Lead Processing
+    // Step 3: end-of-call cleanup
     if (messageType === "end-of-call-report") {
-        logger.info("Processing end-of-call-report", { callId });
-
+        console.log(`[DEBUG] Received End of Call Report for callId: ${callId}`);
         try {
-            // Build transcript with speaker labels for better LLM context
+            logger.info("Processing end-of-call-report", { callId });
+
             const history = conversationHistoryMap[callId] || [];
             const historyTranscript = history
                 .map(t => `${t.role === "user" ? "User" : "Alex"}: ${t.content}`)
-                .join("\n") || message.artifact?.transcript || "";
+                .join("\n");
 
             const payload = parseEndOfCallReport(body, historyTranscript);
+            const transcript = message.artifact?.transcript || historyTranscript || ""; // Defined safely
 
-            // --- LLM SHADOW PASS (Extraction & Summary) ---
+            const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+            let extractedName = "Unknown";
+            let extractedEmail = "Unknown";
+            let summary = payload.summary || "Discussion regarding legacy system modernization.";
+
+            // Refined extraction and summary via Groq
             try {
-                // 1. EXTRACTION PASS: Get clean JSON data for name and email
+                // 1. EXTRACTION PASS: Get clean JSON data
                 const extraction = await groq.chat.completions.create({
                     model: "llama-3.1-8b-instant",
                     messages: [
-                        { role: "system", content: "Extract the caller's name and email from the transcript. Return ONLY JSON: { \"name\": \"...\", \"email\": \"...\" }. Use 'Unknown' if missing." },
-                        { role: "user", content: historyTranscript }
+                        { role: "system", content: "Extract the name and email from the transcript. Return ONLY JSON: { \"name\": \"...\", \"email\": \"...\" }. Use 'Unknown' if missing." },
+                        { role: "user", content: transcript }
                     ],
                     response_format: { type: "json_object" },
                     temperature: 0.1
                 });
 
-                const { name, email } = JSON.parse(extraction.choices[0].message.content);
-                if (name && name !== "Unknown") payload.customer.name = name;
-                if (email && email !== "Unknown") payload.customer.email = email;
+                const parsed = JSON.parse(extraction.choices[0].message.content);
+                extractedName = parsed.name || "Unknown";
+                extractedEmail = parsed.email || "Unknown";
 
+                if (extractedName !== "Unknown") payload.customer.name = extractedName;
+                if (extractedEmail !== "Unknown") payload.customer.email = extractedEmail;
+
+                // 2. SUMMARY PASS: Write the 1-sentence recap
                 // 2. SUMMARY PASS: Write the 1-sentence recap
                 const summaryGen = await groq.chat.completions.create({
                     model: "llama-3.1-8b-instant",
                     messages: [
-                        { role: "system", content: "Write a 1-sentence summary of the user's technical problem for a follow-up email. Be professional." },
-                        { role: "user", content: historyTranscript }
+                        {
+                            role: "system",
+                            content: "Extract the user's core technical problem from the transcript in exactly ONE concise sentence. Start with an action verb (e.g., 'Modernizing a 30-year-old COBOL system'). DO NOT include greetings, sign-offs, or conversational filler like 'Here is the summary'. Return ONLY the raw sentence."
+                        },
+                        { role: "user", content: transcript }
                     ],
-                    temperature: 0.3
+                    temperature: 0.1, // Turn down creativity so it stops "guessing"
+                    max_tokens: 40    // Physically block it from writing a long email
                 });
+                summary = summaryGen.choices[0].message.content.trim();
 
-                const summary = summaryGen.choices[0].message.content.trim();
-                payload.summary = summary; // Attach smart summary to the CRM payload
-
-                // 3. VALIDATION & DISPATCH
-                const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-                if (email !== 'Unknown' && emailRegex.test(email)) {
-                    await sendFollowUpEmail(email, payload.customer.name, summary);
-                    logger.info(`[MAIL] Success: Personalized follow-up sent to ${email}`);
-
-                    // Push specific email success event to dashboard
-                    pushEvent(callId, 'LEAD_CAPTURED', { name, email, summary, status: 'Email Sent' });
-                }
             } catch (llmErr) {
-                logger.warn("Groq post-call processing failed, falling back to basic payload", { callId, error: llmErr.message });
+                logger.warn("Groq entity/summary extraction failed, falling back", { callId, error: llmErr.message });
             }
 
-            // Push final data to CRM and WebSocket
+            // 3. VALIDATION & DISPATCH
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (extractedEmail !== 'Unknown' && emailRegex.test(extractedEmail)) {
+                await sendFollowUpEmail(extractedEmail, extractedName, summary);
+                console.log(`[MAIL] Success: Personalized follow-up sent to ${extractedEmail}`);
+
+                // Corrected dashboard push using existing pushEvent
+                pushEvent(callId, 'LEAD_CAPTURED', {
+                    name: extractedName,
+                    email: extractedEmail,
+                    summary: summary,
+                    status: 'Email Sent'
+                });
+            }
+
             dispatchLead(payload);
             pushEvent(callId, "CALL_ENDED", {
                 lead: payload,
-                summary: payload.summary,
+                summary: summary,
             });
-
         } catch (err) {
-            logger.error("End-of-call extraction failed", { callId, error: err.message });
+            logger.error("Lead extraction failed", { callId, error: err.message });
         } finally {
             cleanUpSession(callId);
         }
         return res.status(200).json({ received: true });
     }
 
-    // Step 4: Assistant-request — SPEAK FIRST logic
+    // Step 4: assistant-request — SPEAK FIRST logic
     if (messageType === "assistant-request") {
         const firstMsg = "Welcome to Dino Software. I'm Alex. Are you looking to modernize a legacy system today?";
-        logger.info("Assistant request received — returning firstMessage", { callId });
 
+        logger.info("Assistant request received — returning firstMessage", { callId });
         pushEvent(callId, "CALL_STARTED", {
             ts: Date.now(),
-            firstMessage: firstMsg
+            firstMessage: "Welcome to Dino Software. I'm Alex..." // Dashboard sync
         });
 
         return res.status(200).json({
@@ -183,7 +199,7 @@ router.post('/webhook', async (req, res) => {
         });
     }
 
-    // Step 5: Tool-calls — The "Brain"
+    // Step 5: tool-calls — The "Brain"
     if (messageType === "tool-calls") {
         try {
             let transcript = "";
@@ -205,7 +221,6 @@ router.post('/webhook', async (req, res) => {
                 logger.warn("Duplicate tool-call detected", { callId, toolCallId });
                 return res.status(200).json({ results: [{ toolCallId, result: "" }] });
             }
-
             processedToolCalls.add(toolCallId);
             if (processedToolCalls.size > 500) processedToolCalls.clear();
 
@@ -221,18 +236,17 @@ router.post('/webhook', async (req, res) => {
             const lastResponse = lastResponseMap[callId] || "";
             const normalizedTranscript = transcript.toLowerCase().trim();
             const normalizedLast = lastResponse.toLowerCase().trim();
-
             if (normalizedLast && (
                 normalizedLast === normalizedTranscript ||
-                (normalizedLast.includes(normalizedTranscript) && normalizedTranscript.length > 20)
+                normalizedLast.includes(normalizedTranscript) && normalizedTranscript.length > 20
             )) {
                 logger.warn("Echo/duplicate detected — skipping routing", { callId, transcript });
                 return res.status(200).json({ results: [{ toolCallId, result: "" }] });
             }
 
-            // Extract and cache entities on the fly
+            // Extract and cache any entities found in this transcript
             if (!entityMap[callId]) entityMap[callId] = { name: "Unknown", email: "" };
-
+            const { extractName, extractEmail } = require("../services/leadParser");
             const detectedName = extractName(transcript);
             const detectedEmail = extractEmail(transcript);
             if (detectedName !== "Unknown") entityMap[callId].name = detectedName;
@@ -242,23 +256,23 @@ router.post('/webhook', async (req, res) => {
             if (!conversationHistoryMap[callId]) conversationHistoryMap[callId] = [];
             conversationHistoryMap[callId].push({ role: "user", content: transcript });
 
-            // Route through state machine
+            // Route through brain, passing both entity context and conversation history
             const currentState = callStateMap[callId] || CallStateMap.GREETING;
             logger.info("Routing through state machine", { callId, fromState: currentState, transcript });
 
             const result = await routingHandler(transcript, currentState, entityMap[callId], conversationHistoryMap[callId]);
 
-            // Update State & History Cache
             callStateMap[callId] = result.nextState;
             lastResponseMap[callId] = result.content;
+
+            // Append bot response to conversation history for full context on next turn
             conversationHistoryMap[callId].push({ role: "bot", content: result.content });
 
-            // Cap history at 20 turns (10 exchanges) to prevent token overflow
+            // Cap history at 20 turns (10 exchanges) to stay within token budgets
             if (conversationHistoryMap[callId].length > 20) {
                 conversationHistoryMap[callId] = conversationHistoryMap[callId].slice(-20);
             }
 
-            // Broadcast events to frontend
             pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
                 transcript,
                 response: result.content,
