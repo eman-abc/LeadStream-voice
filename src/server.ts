@@ -19,6 +19,13 @@ app.use(express.json());
 const path = require("path");
 app.use(express.static(path.join(__dirname, "../public")));
 
+// --- Chrome DevTools Silencer ---
+// Chrome automatically looks for this file. We give it an empty JSON object to stop the 404/CSP errors.
+app.get('/.well-known/appspecific/com.chrome.devtools.json', (req, res) => {
+    res.status(200).json({});
+});
+
+
 // HTTP fallback for event history (polling)
 app.get("/api/events", (req, res) => {
     res.json({ events: getEventStore() });
@@ -33,9 +40,13 @@ app.get("/health", (req, res) => {
 
 });
 
+app.get("/dashboard", (req, res) => {
+    res.sendFile(path.join(__dirname, "../public/dashboard.html"));
+});
 // Start server
 const httpServer = http.createServer(app);
 initWebSocketServer(httpServer);
+
 
 module.exports = { app, httpServer };
 
