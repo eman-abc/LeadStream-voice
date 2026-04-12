@@ -5,6 +5,7 @@ const express = require('express');
 const vapiRouter = require('./controllers/vapiController');
 const { initWebSocketServer, getEventStore } = require("./ws/broadcaster");
 const http = require("http");
+const path = require("path");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -16,8 +17,11 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(express.json());
 
-const path = require("path");
 app.use(express.static(path.join(__dirname, "../public")));
+
+app.get("/", (req, res) => {
+    res.redirect("/dashboard");
+});
 
 // --- Chrome DevTools Silencer ---
 // Chrome automatically looks for this file. We give it an empty JSON object to stop the 404/CSP errors.
