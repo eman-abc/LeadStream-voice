@@ -6,8 +6,15 @@
 <title>Dino Software — Lead Triage Dashboard</title>
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script>
+    // Suppress Babel's standalone production warning
+    const _warn = console.warn;
+    console.warn = (...args) => {
+        if (typeof args[0] === 'string' && args[0].includes('in-browser Babel transformer')) return;
+        _warn(...args);
+    };
+</script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@vapi-ai/web@latest/dist/vapi.browser.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   
@@ -334,30 +341,48 @@ function App() {
 
     // ── Vapi SDK initialisation ───────────────────────────────────────────────
     useEffect(() => {
-        if (!window.Vapi) { console.warn("[VAPI] SDK not loaded"); return; }
-        if (!VAPI_PUBLIC_KEY || VAPI_PUBLIC_KEY === "PASTE_YOUR_PUBLIC_KEY_HERE") {
-            console.warn("[VAPI] Public key not set — call button disabled");
-            return;
-        }
-        const vapi = new window.Vapi(VAPI_PUBLIC_KEY);
-        vapiRef.current = vapi;
+        let isMounted = true;
+        let vapiInstance = null;
 
-        vapi.on("call-start", () => {
-            console.log("[VAPI] Call started");
-            setCallStatus("active");
-        });
+        const initSDK = async () => {
+            if (!VAPI_PUBLIC_KEY || VAPI_PUBLIC_KEY === "PASTE_YOUR_PUBLIC_KEY_HERE") {
+                console.warn("[VAPI] Public key not set — call button disabled");
+                return;
+            }
 
-        vapi.on("call-end", () => {
-            console.log("[VAPI] Call ended");
-            setCallStatus("idle");
-        });
+            try {
+                const VapiModule = await import("https://esm.sh/@vapi-ai/web@latest");
+                if (!isMounted) return;
+                
+                const VapiSDK = VapiModule.default || VapiModule.Vapi;
+                vapiInstance = new VapiSDK(VAPI_PUBLIC_KEY);
+                vapiRef.current = vapiInstance;
 
-        vapi.on("error", (err) => {
-            console.error("[VAPI] Error:", err);
-            setCallStatus("idle");
-        });
+                vapiInstance.on("call-start", () => {
+                    console.log("[VAPI] Call started");
+                    setCallStatus("active");
+                });
 
-        return () => { vapi.stop(); };
+                vapiInstance.on("call-end", () => {
+                    console.log("[VAPI] Call ended");
+                    setCallStatus("idle");
+                });
+
+                vapiInstance.on("error", (err) => {
+                    console.error("[VAPI] Error:", err);
+                    setCallStatus("idle");
+                });
+            } catch (err) {
+                console.error("[VAPI] Failed to dynamically load SDK via ESM.sh:", err);
+            }
+        };
+
+        initSDK();
+
+        return () => { 
+            isMounted = false;
+            if (vapiInstance) vapiInstance.stop(); 
+        };
     }, []);
 
     const toggleCall = useCallback(() => {
