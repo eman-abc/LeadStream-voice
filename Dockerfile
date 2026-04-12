@@ -16,5 +16,6 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 COPY src/data ./dist/data
 COPY public ./public
+COPY docs ./docs
 EXPOSE 3000
 CMD ["node", "dist/server.js"]
