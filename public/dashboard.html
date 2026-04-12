@@ -277,8 +277,8 @@ function App() {
     };
 
     const connect = useCallback(() => {
-        const protocol = location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(`${protocol}://${location.host}`);
+        const wsUrl = window.location.origin.replace(/^http/, 'ws');
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
