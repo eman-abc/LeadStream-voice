@@ -29,8 +29,8 @@ const CONTACT_PATTERNS = [
 
 // Farewell patterns — caller is done
 const FAREWELL_PATTERNS = [
-    /^no[,.]?\s*(that'?s?\s*all)?\.?$/i,
-    /^(nope|nah|no thanks)\.?$/i,
+    /^no[,.]?\s*(that'?s?\s*all)?\\.?$/i,
+    /^(nope|nah|no thanks)\\.?$/i,
     /that'?s all/i,
     /goodbye/i,
     /^bye/i,
@@ -39,7 +39,14 @@ const FAREWELL_PATTERNS = [
     /i'?m\s*(good|all set|done)/i,
 ];
 
-async function handleRouting(transcript, currentState) {
+/**
+ * handleRouting — main state-machine entry point.
+ * @param {string} transcript - The exact user utterance
+ * @param {string} currentState - Current call state
+ * @param {{ name?: string, email?: string }} [entityContext] - Already extracted entities
+ */
+async function handleRouting(transcript, currentState, entityContext) {
+    entityContext = entityContext || {};
     const lower = transcript.toLowerCase().trim();
 
     // REDLINE GATE
@@ -55,31 +62,52 @@ async function handleRouting(transcript, currentState) {
         };
     }
 
+    // Check if we already have both entities — skip data collection prompts
+    const hasName = entityContext.name && entityContext.name !== "Unknown";
+    const hasEmail = entityContext.email && entityContext.email.length > 0;
+    const hasAllEntities = hasName && hasEmail;
+
     switch (currentState) {
 
         case CallStateEnum.GREETING: {
             const next = detectNextState(lower);
-            if (next === CallStateEnum.DATA_COLLECTION) {
+            if (next === CallStateEnum.DATA_COLLECTION && !hasAllEntities) {
+                const missingPrompt = buildMissingEntityPrompt(hasName, hasEmail);
                 return {
-                    content: "Absolutely! Could I get your full name and the best email address to reach you?",
+                    content: `Absolutely! ${missingPrompt}`,
                     nextState: CallStateEnum.DATA_COLLECTION,
                     redlined: false,
                 };
             }
-            const groqResponse = await queryGroq(transcript);
+            if (next === CallStateEnum.DATA_COLLECTION && hasAllEntities) {
+                return {
+                    content: `Perfect, I have your details on file! A solutions architect will be in touch at ${entityContext.email}. Is there anything else I can help with?`,
+                    nextState: CallStateEnum.CONFIRM_CLOSE,
+                    redlined: false,
+                };
+            }
+            const groqResponse = await queryGroq(transcript, entityContext);
             return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
         }
 
         case CallStateEnum.INFO_SEARCH: {
             const next = detectNextState(lower);
-            if (next === CallStateEnum.DATA_COLLECTION) {
+            if (next === CallStateEnum.DATA_COLLECTION && !hasAllEntities) {
+                const missingPrompt = buildMissingEntityPrompt(hasName, hasEmail);
                 return {
-                    content: "Great! Could I get your full name and the best email address to reach you?",
+                    content: `Great! ${missingPrompt}`,
                     nextState: CallStateEnum.DATA_COLLECTION,
                     redlined: false,
                 };
             }
-            const groqResponse = await queryGroq(transcript);
+            if (next === CallStateEnum.DATA_COLLECTION && hasAllEntities) {
+                return {
+                    content: `I've already got your info — a solutions architect will reach out to ${entityContext.email} shortly. Anything else?`,
+                    nextState: CallStateEnum.CONFIRM_CLOSE,
+                    redlined: false,
+                };
+            }
+            const groqResponse = await queryGroq(transcript, entityContext);
             return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
         }
 
@@ -98,15 +126,16 @@ async function handleRouting(transcript, currentState) {
             }
 
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript);
+                const groqResponse = await queryGroq(transcript, entityContext);
+                const suffix = !hasAllEntities ? " Now, could I grab your name and email to get you booked in?" : "";
                 return {
-                    content: groqResponse + " Now, could I grab your name and email to get you booked in?",
+                    content: groqResponse + suffix,
                     nextState: CallStateEnum.DATA_COLLECTION,
                     redlined: false,
                 };
             }
 
-            // Ambiguous — assume contact info
+            // Ambiguous — assume contact info received
             return {
                 content:
                     "Got it, thank you! A solutions architect will reach out to you shortly. " +
@@ -129,7 +158,7 @@ async function handleRouting(transcript, currentState) {
 
             const next = detectNextState(lower);
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript);
+                const groqResponse = await queryGroq(transcript, entityContext);
                 return { content: groqResponse, nextState: CallStateEnum.CONFIRM_CLOSE, redlined: false };
             }
 
@@ -143,7 +172,7 @@ async function handleRouting(transcript, currentState) {
         case CallStateEnum.REDLINE: {
             const next = detectNextState(lower);
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript);
+                const groqResponse = await queryGroq(transcript, entityContext);
                 return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
             }
             return {
@@ -169,6 +198,16 @@ async function handleRouting(transcript, currentState) {
                 redlined: false,
             };
     }
+}
+
+/**
+ * Builds the right entity-collection prompt based on what's already known.
+ */
+function buildMissingEntityPrompt(hasName, hasEmail) {
+    if (!hasName && !hasEmail) return "Could I get your full name and the best email address to reach you?";
+    if (!hasName) return "Could I get your full name?";
+    if (!hasEmail) return "And what's the best email address to reach you?";
+    return "";
 }
 
 function detectNextState(lower) {

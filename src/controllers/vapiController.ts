@@ -29,6 +29,9 @@ const callStateMap = {};
 /** @type {Record<string, string>} - Stores last response per call to detect echo */
 const lastResponseMap = {};
 
+/** @type {Record<string, {name: string, email: string}>} - Known entities per call */
+const entityMap = {};
+
 /** @type {Record<string, NodeJS.Timeout>} - Safety reapers for abandoned sessions */
 const sessionReapers = {};
 
@@ -46,6 +49,7 @@ function cleanUpSession(callId) {
     }
     delete callStateMap[callId];
     delete lastResponseMap[callId];
+    delete entityMap[callId];
     logger.info(`Session cleaned up`, { callId });
 }
 
@@ -153,20 +157,32 @@ router.post('/webhook', async (req, res) => {
                 });
             }
 
-            // Guard 3: Echo detection
+            // Guard 3: Strict echo deduplication — drop if transcript == last bot response
             const lastResponse = lastResponseMap[callId] || "";
             const normalizedTranscript = transcript.toLowerCase().trim();
             const normalizedLast = lastResponse.toLowerCase().trim();
-            if (normalizedLast && normalizedLast.startsWith(normalizedTranscript.slice(0, 40))) {
-                logger.warn("Echo detected — skipping routing", { callId, transcript });
+            // Exact match OR transcript is fully contained within the bot's last response (echo/replay)
+            if (normalizedLast && (
+                normalizedLast === normalizedTranscript ||
+                normalizedLast.includes(normalizedTranscript) && normalizedTranscript.length > 20
+            )) {
+                logger.warn("Echo/duplicate detected — skipping routing", { callId, transcript });
                 return res.status(200).json({ results: [{ toolCallId, result: "" }] });
             }
 
-            // Route through brain
+            // Extract and cache any entities found in this transcript
+            if (!entityMap[callId]) entityMap[callId] = { name: "Unknown", email: "" };
+            const { extractName, extractEmail } = require("../services/leadParser");
+            const detectedName = extractName(transcript);
+            const detectedEmail = extractEmail(transcript);
+            if (detectedName !== "Unknown") entityMap[callId].name = detectedName;
+            if (detectedEmail) entityMap[callId].email = detectedEmail;
+
+            // Route through brain, passing the entity context
             const currentState = callStateMap[callId] || CallStateMap.GREETING;
             logger.info("Routing through state machine", { callId, fromState: currentState, transcript });
             
-            const result = await routingHandler(transcript, currentState);
+            const result = await routingHandler(transcript, currentState, entityMap[callId]);
             
             callStateMap[callId] = result.nextState;
             lastResponseMap[callId] = result.content;

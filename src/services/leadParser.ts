@@ -125,4 +125,4 @@ function parseEndOfCallReport(reportBody) {
     };
 }
 
-module.exports = { parseEndOfCallReport };
+module.exports = { parseEndOfCallReport, extractName, extractEmail };
