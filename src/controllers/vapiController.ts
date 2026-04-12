@@ -32,6 +32,9 @@ const lastResponseMap = {};
 /** @type {Record<string, {name: string, email: string}>} - Known entities per call */
 const entityMap = {};
 
+/** @type {Record<string, Array<{role: string, content: string}>>} - Full conversation history per call */
+const conversationHistoryMap = {};
+
 /** @type {Record<string, NodeJS.Timeout>} - Safety reapers for abandoned sessions */
 const sessionReapers = {};
 
@@ -50,6 +53,7 @@ function cleanUpSession(callId) {
     delete callStateMap[callId];
     delete lastResponseMap[callId];
     delete entityMap[callId];
+    delete conversationHistoryMap[callId];
     logger.info(`Session cleaned up`, { callId });
 }
 
@@ -178,14 +182,26 @@ router.post('/webhook', async (req, res) => {
             if (detectedName !== "Unknown") entityMap[callId].name = detectedName;
             if (detectedEmail) entityMap[callId].email = detectedEmail;
 
-            // Route through brain, passing the entity context
+            // Append user turn to conversation history
+            if (!conversationHistoryMap[callId]) conversationHistoryMap[callId] = [];
+            conversationHistoryMap[callId].push({ role: "user", content: transcript });
+
+            // Route through brain, passing both entity context and conversation history
             const currentState = callStateMap[callId] || CallStateMap.GREETING;
             logger.info("Routing through state machine", { callId, fromState: currentState, transcript });
             
-            const result = await routingHandler(transcript, currentState, entityMap[callId]);
+            const result = await routingHandler(transcript, currentState, entityMap[callId], conversationHistoryMap[callId]);
             
             callStateMap[callId] = result.nextState;
             lastResponseMap[callId] = result.content;
+
+            // Append bot response to conversation history for full context on next turn
+            conversationHistoryMap[callId].push({ role: "bot", content: result.content });
+
+            // Cap history at 20 turns (10 exchanges) to stay within token budgets
+            if (conversationHistoryMap[callId].length > 20) {
+                conversationHistoryMap[callId] = conversationHistoryMap[callId].slice(-20);
+            }
 
             pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
                 transcript,

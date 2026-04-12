@@ -44,9 +44,11 @@ const FAREWELL_PATTERNS = [
  * @param {string} transcript - The exact user utterance
  * @param {string} currentState - Current call state
  * @param {{ name?: string, email?: string }} [entityContext] - Already extracted entities
+ * @param {Array<{role: string, content: string}>} [history] - Full conversation so far
  */
-async function handleRouting(transcript, currentState, entityContext) {
+async function handleRouting(transcript, currentState, entityContext, history) {
     entityContext = entityContext || {};
+    history = history || [];
     const lower = transcript.toLowerCase().trim();
 
     // REDLINE GATE
@@ -86,7 +88,7 @@ async function handleRouting(transcript, currentState, entityContext) {
                     redlined: false,
                 };
             }
-            const groqResponse = await queryGroq(transcript, entityContext);
+            const groqResponse = await queryGroq(transcript, history, entityContext);
             return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
         }
 
@@ -107,7 +109,7 @@ async function handleRouting(transcript, currentState, entityContext) {
                     redlined: false,
                 };
             }
-            const groqResponse = await queryGroq(transcript, entityContext);
+            const groqResponse = await queryGroq(transcript, history, entityContext);
             return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
         }
 
@@ -126,7 +128,7 @@ async function handleRouting(transcript, currentState, entityContext) {
             }
 
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript, entityContext);
+                const groqResponse = await queryGroq(transcript, history, entityContext);
                 const suffix = !hasAllEntities ? " Now, could I grab your name and email to get you booked in?" : "";
                 return {
                     content: groqResponse + suffix,
@@ -158,7 +160,7 @@ async function handleRouting(transcript, currentState, entityContext) {
 
             const next = detectNextState(lower);
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript, entityContext);
+                const groqResponse = await queryGroq(transcript, history, entityContext);
                 return { content: groqResponse, nextState: CallStateEnum.CONFIRM_CLOSE, redlined: false };
             }
 
@@ -172,7 +174,7 @@ async function handleRouting(transcript, currentState, entityContext) {
         case CallStateEnum.REDLINE: {
             const next = detectNextState(lower);
             if (next === CallStateEnum.INFO_SEARCH) {
-                const groqResponse = await queryGroq(transcript, entityContext);
+                const groqResponse = await queryGroq(transcript, history, entityContext);
                 return { content: groqResponse, nextState: CallStateEnum.INFO_SEARCH, redlined: false };
             }
             return {
