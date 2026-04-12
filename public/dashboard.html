@@ -15,6 +15,10 @@
     };
 </script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="module">
+    import Vapi from 'https://esm.sh/@vapi-ai/web@latest';
+    window.Vapi = Vapi;
+</script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   
@@ -341,21 +345,27 @@ function App() {
 
     // ── Vapi SDK initialisation ───────────────────────────────────────────────
     useEffect(() => {
-        let isMounted = true;
         let vapiInstance = null;
+        let retryCount = 0;
 
-        const initSDK = async () => {
+        const initSDK = () => {
+            if (!window.Vapi) {
+                if (retryCount < 10) {
+                    retryCount++;
+                    setTimeout(initSDK, 500); // Wait for module script to attach to window
+                } else {
+                    console.warn("[VAPI] SDK not loaded after retries");
+                }
+                return;
+            }
+
             if (!VAPI_PUBLIC_KEY || VAPI_PUBLIC_KEY === "PASTE_YOUR_PUBLIC_KEY_HERE") {
                 console.warn("[VAPI] Public key not set — call button disabled");
                 return;
             }
 
             try {
-                const VapiModule = await import("https://esm.sh/@vapi-ai/web@latest");
-                if (!isMounted) return;
-                
-                const VapiSDK = VapiModule.default || VapiModule.Vapi;
-                vapiInstance = new VapiSDK(VAPI_PUBLIC_KEY);
+                vapiInstance = new window.Vapi(VAPI_PUBLIC_KEY);
                 vapiRef.current = vapiInstance;
 
                 vapiInstance.on("call-start", () => {
@@ -373,14 +383,13 @@ function App() {
                     setCallStatus("idle");
                 });
             } catch (err) {
-                console.error("[VAPI] Failed to dynamically load SDK via ESM.sh:", err);
+                console.error("[VAPI] Failed to initialize SDK:", err);
             }
         };
 
         initSDK();
 
         return () => { 
-            isMounted = false;
             if (vapiInstance) vapiInstance.stop(); 
         };
     }, []);
