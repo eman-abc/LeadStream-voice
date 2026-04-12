@@ -327,6 +327,7 @@
         .event-type { font-weight: 600; min-width: 110px; }
         .event-type.CALL_STARTED { color: var(--accent); }
         .event-type.TURN { color: var(--info); }
+        .event-type.BOT_RESPONSE { color: var(--success); }
         .event-type.REDLINE { color: var(--danger); }
         .event-type.CALL_ENDED { color: var(--purple); }
 
@@ -411,7 +412,8 @@
         function EventRow({ event }) {
             const detail = (() => {
                 if (event.type === "CALL_STARTED") return "Call connected";
-                if (event.type === "TURN") return `"${event.data.transcript || ""}"`;
+                if (event.type === "TURN") return `U: "${event.data.transcript || ""}"`;
+                if (event.type === "BOT_RESPONSE") return `A: "${event.data.transcript || ""}"`;
                 if (event.type === "CALL_ENDED") return `Lead: ${event.data.lead?.customer?.name || "?"}`;
                 return JSON.stringify(event.data);
             })();
@@ -428,12 +430,21 @@
         const ASSISTANT_ID = "b629145c-ca53-4024-abc5-636fa1a770b1";
 
         function App() {
-            const [events, setEvents] = useState([]);
+            const [events, setEvents] = useState(() => {
+                try {
+                    const saved = localStorage.getItem("leadstream_events");
+                    return saved ? JSON.parse(saved) : [];
+                } catch { return []; }
+            });
             const [wsStatus, setWsStatus] = useState("connecting");
             const [tab, setTab] = useState("leads");
             const [callStatus, setCallStatus] = useState("idle");
             const wsRef = useRef(null);
             const vapiRef = useRef(null);
+
+            useEffect(() => {
+                localStorage.setItem("leadstream_events", JSON.stringify(events));
+            }, [events]);
 
             const leads = events.filter(e => e.type === "CALL_ENDED");
             const activeCalls = events.filter(e => e.type === "CALL_STARTED" && !events.some(x => x.type === "CALL_ENDED" && x.callId === e.callId));
@@ -443,8 +454,19 @@
                 ws.onopen = () => setWsStatus("connected");
                 ws.onmessage = (msg) => {
                     const data = JSON.parse(msg.data);
-                    if (data.type === "HISTORY") setEvents(data.events);
-                    if (data.type === "EVENT") setEvents(prev => [...prev, data.event]);
+                    if (data.type === "HISTORY") {
+                        setEvents(prev => {
+                            const combined = [...prev, ...data.events];
+                            const unique = combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+                            return unique.sort((a, b) => a.ts - b.ts);
+                        });
+                    }
+                    if (data.type === "EVENT") {
+                        setEvents(prev => {
+                            const newEvents = [...prev, data.event];
+                            return newEvents.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+                        });
+                    }
                 };
                 ws.onclose = () => setTimeout(connect, 3000);
                 wsRef.current = ws;

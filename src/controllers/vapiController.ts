@@ -179,6 +179,11 @@ router.post('/webhook', async (req, res) => {
                 redlined: result.redlined,
             });
 
+            pushEvent(callId, "BOT_RESPONSE", {
+                transcript: result.content,
+                state: result.nextState,
+            });
+
             logger.info("Brain Response complete", { 
                 callId, 
                 nextState: result.nextState, 

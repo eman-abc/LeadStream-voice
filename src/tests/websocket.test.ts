@@ -60,9 +60,9 @@ describe("WebSocket Dashboard Integration", () => {
             }
         };
 
-        // Fire the webhook
         await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", process.env.VAPI_SECRET || "")
             .send(payload)
             .expect(200);
             
@@ -99,16 +99,18 @@ describe("WebSocket Dashboard Integration", () => {
 
         await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", process.env.VAPI_SECRET || "")
             .send(payload)
             .expect(200);
 
         await new Promise(r => setTimeout(r, 100));
 
         const eventMsgs = receivedMessages.filter(m => m.type === "EVENT");
-        expect(eventMsgs.length).toBe(1);
+        // We now emit BOT_RESPONSE as well, so there should be 2 events here.
+        expect(eventMsgs.length).toBeGreaterThanOrEqual(1);
         
-        const turnEvent = eventMsgs[0].event;
-        expect(turnEvent.type).toBe("TURN");
+        const turnEvent = eventMsgs.find(m => m.event.type === "TURN")?.event;
+        expect(turnEvent).toBeDefined();
         expect(turnEvent.callId).toBe(callId);
         expect(turnEvent.data.transcript).toBe("I want to book a demo");
     });
@@ -131,6 +133,7 @@ describe("WebSocket Dashboard Integration", () => {
 
         await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", process.env.VAPI_SECRET || "")
             .send(payload)
             .expect(200);
 

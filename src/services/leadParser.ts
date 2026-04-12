@@ -95,15 +95,18 @@ function wasRedlined(transcript) {
  * @returns {LeadPayload}
  */
 function parseEndOfCallReport(reportBody) {
-    // Build a single string from all transcript messages for analysis
-    const messages = reportBody?.artifact?.messages || 
-                     reportBody?.message?.artifact?.messages || 
-                     [];
+    // Extract transcript from the end-of-call-report payload structure
+    const artifact = reportBody?.artifact || reportBody?.message?.artifact || {};
+    let fullTranscript = artifact.transcript || "";
     
-    const fullTranscript = messages
-        .filter(m => m.role === "user" || m.role === "bot")
-        .map(m => m.message || m.content || "")
-        .join(" ");
+    // Fallback: Build a single string from all transcript messages for analysis
+    if (!fullTranscript) {
+        const messages = artifact.messages || [];
+        fullTranscript = messages
+            .filter(m => m.role === "user" || m.role === "bot" || m.role === "assistant")
+            .map(m => m.message || m.content || "")
+            .join(" ");
+    }
 
     const callId = reportBody?.call?.id ||
                    reportBody?.message?.call?.id ||
