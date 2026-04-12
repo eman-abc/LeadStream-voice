@@ -92,21 +92,28 @@ function wasRedlined(transcript) {
 /**
  * parseEndOfCallReport — main export. Converts raw VAPI report into LeadPayload.
  * @param {any} reportBody - req.body from the end-of-call-report webhook
+ * @param {string} [historyTranscript] - In-memory conversation history from controller
  * @returns {LeadPayload}
  */
-function parseEndOfCallReport(reportBody) {
+function parseEndOfCallReport(reportBody, historyTranscript) {
     // Extract transcript from the end-of-call-report payload structure
     const artifact = reportBody?.artifact || reportBody?.message?.artifact || {};
-    let fullTranscript = artifact.transcript || "";
-    
+    let artifactTranscript = artifact.transcript || "";
+
     // Fallback: Build a single string from all transcript messages for analysis
-    if (!fullTranscript) {
+    if (!artifactTranscript) {
         const messages = artifact.messages || [];
-        fullTranscript = messages
+        artifactTranscript = messages
             .filter(m => m.role === "user" || m.role === "bot" || m.role === "assistant")
             .map(m => m.message || m.content || "")
             .join(" ");
     }
+
+    // Prefer the in-memory history (has name/email from turn 1) over the artifact.
+    // Merge both so entities mentioned anywhere in the call are captured.
+    const fullTranscript = [historyTranscript || "", artifactTranscript]
+        .filter(Boolean)
+        .join(" ");
 
     const callId = reportBody?.call?.id ||
                    reportBody?.message?.call?.id ||
@@ -120,7 +127,7 @@ function parseEndOfCallReport(reportBody) {
             email: extractEmail(fullTranscript),
         },
         intent: extractIntent(fullTranscript),
-        summary: fullTranscript.slice(0, 200).trim() || "No transcript available",
+        summary: (historyTranscript || artifactTranscript).slice(0, 200).trim() || "No transcript available",
         redlineFlagged: wasRedlined(fullTranscript),
     };
 }

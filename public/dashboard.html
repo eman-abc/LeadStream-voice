@@ -331,6 +331,42 @@
         .event-type.REDLINE { color: var(--danger); }
         .event-type.CALL_ENDED { color: var(--purple); }
 
+        /* CHAT VIEW */
+        .chat-view { display: flex; flex-direction: column; gap: 10px; }
+
+        .chat-meta { font-size: 10px; color: var(--muted); text-align: center; padding: 4px 0; }
+
+        .chat-bubble {
+            display: flex;
+            flex-direction: column;
+            max-width: 78%;
+        }
+        .chat-bubble.user { align-self: flex-end; align-items: flex-end; }
+        .chat-bubble.bot  { align-self: flex-start; align-items: flex-start; }
+
+        .bubble-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+
+        .bubble-text {
+            padding: 9px 13px;
+            border-radius: 14px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .chat-bubble.user .bubble-text {
+            background: rgba(55,138,221,.18);
+            color: var(--info);
+            border-bottom-right-radius: 3px;
+        }
+        .chat-bubble.bot .bubble-text {
+            background: rgba(93,202,165,.12);
+            color: var(--accent);
+            border-bottom-left-radius: 3px;
+        }
+        .chat-bubble.redline .bubble-text {
+            background: rgba(226,75,74,.12);
+            color: var(--danger);
+        }
+
         .event-detail { opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         .call-btn {
@@ -407,6 +443,42 @@
                     {lead.summary && <div className="lead-summary">"{lead.summary}"</div>}
                 </div>
             );
+        }
+
+        function ChatBubble({ event }) {
+            const t = new Date(event.ts).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+            if (event.type === "CALL_STARTED") {
+                return <div className="chat-meta">📞 Call started · {t}</div>;
+            }
+            if (event.type === "CALL_ENDED") {
+                const name = event.data.lead?.customer?.name;
+                return <div className="chat-meta">🔴 Call ended{name ? ` · ${name}` : ""} · {t}</div>;
+            }
+            if (event.type === "TURN") {
+                return (
+                    <div className="chat-bubble user">
+                        <div className="bubble-label">Caller · {t}</div>
+                        <div className="bubble-text">{event.data.transcript || ""}</div>
+                    </div>
+                );
+            }
+            if (event.type === "BOT_RESPONSE") {
+                return (
+                    <div className="chat-bubble bot">
+                        <div className="bubble-label">Alex · {t}</div>
+                        <div className="bubble-text">{event.data.transcript || ""}</div>
+                    </div>
+                );
+            }
+            if (event.type === "REDLINE") {
+                return (
+                    <div className="chat-bubble redline">
+                        <div className="bubble-label">⚠ Redline · {t}</div>
+                        <div className="bubble-text">{event.data.transcript || event.data.response || ""}</div>
+                    </div>
+                );
+            }
+            return null;
         }
 
         function EventRow({ event }) {
@@ -525,11 +597,19 @@
                         <div className="main-header">
                             <div className="tab-row">
                                 <button className={`tab ${tab === "leads" ? "active" : ""}`} onClick={() => setTab("leads")}>Leads</button>
-                                <button className={`tab ${tab === "log" ? "active" : ""}`} onClick={() => setTab("log")}>Events</button>
+                                <button className={`tab ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>Chat</button>
+                                <button className={`tab ${tab === "log" ? "active" : ""}`} onClick={() => setTab("log")}>Raw Log</button>
                             </div>
                         </div>
                         <div className="content">
-                            {tab === "leads" ? leads.map(l => <LeadCard key={l.id} lead={l.data.lead} ts={l.ts} />) : events.map(e => <EventRow key={e.id} event={e} />)}
+                            {tab === "leads" ? leads.map(l => <LeadCard key={l.id} lead={l.data.lead} ts={l.ts} />) :
+                                tab === "chat" ?
+                                    <div className="chat-view">
+                                        {events.filter(e => ["CALL_STARTED","TURN","BOT_RESPONSE","REDLINE","CALL_ENDED"].includes(e.type))
+                                            .map(e => <ChatBubble key={e.id} event={e} />)}
+                                    </div>
+                                : events.map(e => <EventRow key={e.id} event={e} />)
+                            }
                         </div>
                     </div>
                 </div>

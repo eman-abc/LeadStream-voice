@@ -25,6 +25,7 @@ describe("POST /vapi/webhook — passthrough events", () => {
         it(`responds 200 immediately to ${eventType}`, async () => {
             const res = await request(app)
                 .post("/vapi/webhook")
+                .set("x-vapi-secret", "secure_assistant")
                 .send({ message: { type: eventType } })
                 .expect(200);
             expect(res.body).toEqual({ received: true });
@@ -36,6 +37,7 @@ describe("POST /vapi/webhook — tool-calls", () => {
     it("returns results array with toolCallId for clean query", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", "secure_assistant")
             .send({
                 message: {
                     type: "tool-calls",
@@ -61,6 +63,7 @@ describe("POST /vapi/webhook — tool-calls", () => {
     it("returns redline response for sensitive keyword", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", "secure_assistant")
             .send({
                 message: {
                     type: "tool-calls",
@@ -82,6 +85,7 @@ describe("POST /vapi/webhook — tool-calls", () => {
     it("handles missing transcript gracefully", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", "secure_assistant")
             .send({
                 message: {
                     type: "tool-calls",
@@ -103,6 +107,7 @@ describe("POST /vapi/webhook — end-of-call-report", () => {
     it("returns received: true and does not crash", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
+            .set("x-vapi-secret", "secure_assistant")
             .send({
                 message: {
                     type: "end-of-call-report",

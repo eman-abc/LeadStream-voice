@@ -97,9 +97,16 @@ router.post('/webhook', async (req, res) => {
 
     // Step 3: end-of-call cleanup
     if (messageType === "end-of-call-report") {
+        console.log(`[DEBUG] Received End of Call Report for callId: ${callId}`);
         try {
             logger.info("Processing end-of-call-report", { callId });
-            const payload = parseEndOfCallReport(body);
+            // Pass the in-memory conversation history so the parser can see entities
+            // (name/email) mentioned early in the call that Vapi's artifact may miss.
+            const history = conversationHistoryMap[callId] || [];
+            const historyTranscript = history
+                .map(t => `${t.role === "user" ? "User" : "Alex"}: ${t.content}`)
+                .join("\n");
+            const payload = parseEndOfCallReport(body, historyTranscript);
             dispatchLead(payload);
             pushEvent(callId, "CALL_ENDED", {
                 lead: payload,
