@@ -1,21 +1,30 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "commonjs",
+    // "module": "Node16",
     "lib": [
       "ES2020"
     ],
-    "moduleResolution": "node",
+    // "moduleResolution": "node16",
+    "types": [
+      "node",
+      "jest"
+    ],
     "outDir": "./dist",
     "rootDir": "./src",
-    "strict": true,
+    "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noImplicitAny": false,
+    "ignoreDeprecations": "6.0",
+    "isolatedModules": true
   },
   "include": [
     "src/**/*"
