@@ -2,14 +2,19 @@
 
 const { Router } = require('express');
 const rateLimit = require('express-rate-limit');
-const Groq = require("groq-sdk"); // Hoisted import
+const Groq = require("groq-sdk");
+const fs = require("fs");
+const path = require("path");
 const { handleRouting: routingHandler } = require("../state-machine/router");
 const { CallState: CallStateMap } = require("../types");
 const { parseEndOfCallReport } = require("../services/leadParser");
 const { dispatchLead } = require("../services/crmMock");
 const { pushEvent } = require("../ws/broadcaster");
-const { sendFollowUpEmail } = require("../services/mailService"); // Added missing import
 const logger = require("../utils/logger");
+
+// Ensure logs directory exists
+const LOGS_DIR = path.join(__dirname, "../../logs");
+if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
 const router = Router();
 
@@ -162,25 +167,32 @@ router.post('/webhook', async (req, res) => {
                 logger.warn("Groq entity/summary extraction failed, falling back", { callId, error: llmErr.message });
             }
 
-            // 3. VALIDATION & DISPATCH
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            if (extractedEmail !== 'Unknown' && emailRegex.test(extractedEmail)) {
-                await sendFollowUpEmail(extractedEmail, extractedName, summary);
-                console.log(`[MAIL] Success: Personalized follow-up sent to ${extractedEmail}`);
+            // 3. DISPATCH + FILE LOG — no email
+            payload.customer.name = extractedName !== "Unknown" ? extractedName : payload.customer.name;
+            payload.customer.email = extractedEmail !== "Unknown" ? extractedEmail : payload.customer.email;
 
-                // Corrected dashboard push using existing pushEvent
-                pushEvent(callId, 'LEAD_CAPTURED', {
-                    name: extractedName,
-                    email: extractedEmail,
-                    summary: summary,
-                    status: 'Email Sent'
-                });
+            // Write raw call log to disk — persists across server restarts
+            const callLog = {
+                callId,
+                timestamp: new Date().toISOString(),
+                customer: payload.customer,
+                intent: payload.intent,
+                summary,
+                redlineFlagged: payload.redlineFlagged,
+                transcript: historyTranscript,
+            };
+            try {
+                const logPath = path.join(LOGS_DIR, `${callId}.json`);
+                fs.writeFileSync(logPath, JSON.stringify(callLog, null, 2), "utf-8");
+                console.log(`[LOG] Call log saved → logs/${callId}.json`);
+            } catch (writeErr) {
+                logger.warn("Failed to write call log file", { callId, error: writeErr.message });
             }
 
             dispatchLead(payload);
             pushEvent(callId, "CALL_ENDED", {
                 lead: payload,
-                summary: summary,
+                summary,
             });
         } catch (err) {
             logger.error("Lead extraction failed", { callId, error: err.message });

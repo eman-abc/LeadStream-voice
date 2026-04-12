@@ -502,23 +502,41 @@
         const ASSISTANT_ID = "b629145c-ca53-4024-abc5-636fa1a770b1";
 
         function App() {
-            const [events, setEvents] = useState(() => {
-                try {
-                    const saved = localStorage.getItem("leadstream_events");
-                    return saved ? JSON.parse(saved) : [];
-                } catch { return []; }
-            });
+            const [events, setEvents] = useState([]);
             const [wsStatus, setWsStatus] = useState("connecting");
             const [tab, setTab] = useState("leads");
             const [callStatus, setCallStatus] = useState("idle");
             const wsRef = useRef(null);
             const vapiRef = useRef(null);
 
+            const mergeEvents = useCallback((incoming) => {
+                setEvents(prev => {
+                    const combined = [...prev, ...incoming];
+                    const unique = combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
+                    return unique.sort((a, b) => a.ts - b.ts);
+                });
+            }, []);
+
+            // On mount: load server-side persisted events first, then localStorage on top
+            useEffect(() => {
+                fetch('/api/events')
+                    .then(r => r.json())
+                    .then(d => { if (d.events) mergeEvents(d.events); })
+                    .catch(() => {});
+
+                // Merge any events retained in localStorage (handles tab refresh)
+                try {
+                    const saved = localStorage.getItem("leadstream_events");
+                    if (saved) mergeEvents(JSON.parse(saved));
+                } catch {}
+            }, []);
+
+            // Mirror state to localStorage for tab refresh
             useEffect(() => {
                 localStorage.setItem("leadstream_events", JSON.stringify(events));
             }, [events]);
 
-            const leads = events.filter(e => e.type === "CALL_ENDED");
+            const leads = events.filter(e => e.type === "CALL_ENDED" && e.data?.lead?.customer);
             const activeCalls = events.filter(e => e.type === "CALL_STARTED" && !events.some(x => x.type === "CALL_ENDED" && x.callId === e.callId));
 
             const connect = useCallback(() => {
@@ -527,17 +545,10 @@
                 ws.onmessage = (msg) => {
                     const data = JSON.parse(msg.data);
                     if (data.type === "HISTORY") {
-                        setEvents(prev => {
-                            const combined = [...prev, ...data.events];
-                            const unique = combined.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-                            return unique.sort((a, b) => a.ts - b.ts);
-                        });
+                        mergeEvents(data.events);
                     }
                     if (data.type === "EVENT") {
-                        setEvents(prev => {
-                            const newEvents = [...prev, data.event];
-                            return newEvents.filter((v, i, a) => a.findIndex(t => t.id === v.id) === i);
-                        });
+                        mergeEvents([data.event]);
                     }
                 };
                 ws.onclose = () => setTimeout(connect, 3000);
@@ -574,6 +585,10 @@
                     <div className="topbar">
                         <div className="topbar-brand">🦕 Dino — Live Dashboard</div>
                         <div className="topbar-right">
+                            <button id="clear-btn" style={{fontSize:"11px",padding:"4px 10px",borderRadius:"6px",border:"1px solid rgba(255,255,255,.12)",background:"rgba(255,255,255,.05)",color:"var(--muted)",cursor:"pointer",marginRight:"10px"}}
+                                onClick={() => { setEvents([]); localStorage.removeItem("leadstream_events"); }}>
+                                Clear
+                            </button>
                             <button className={`call-btn ${callStatus}`} onClick={toggleCall} disabled={callStatus === "loading"}>
                                 <div className="call-dot" />
                                 {callStatus === "active" ? "End Call" : callStatus === "loading" ? "Connecting..." : "Talk to Alex"}

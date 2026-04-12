@@ -1,5 +1,5 @@
 "use strict";
-import dotenv from 'dotenv';
+const dotenv = require('dotenv');
 dotenv.config(); // Loads the .env file FIRST
 const express = require('express');
 const vapiRouter = require('./controllers/vapiController');

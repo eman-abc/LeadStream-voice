@@ -1,24 +1,33 @@
 "use strict";
 
 const { WebSocketServer } = require("ws");
+const fs = require("fs");
+const path = require("path");
+
+const LOGS_DIR = path.join(__dirname, "../../logs");
+const EVENTS_FILE = path.join(LOGS_DIR, "events.json");
+
+// Ensure logs dir exists
+if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
 /**
- * EVENT STORE — in-memory log of every event this session.
- * 
- * In production this would be PostgreSQL:
- *   CREATE TABLE call_events (
- *     id SERIAL PRIMARY KEY,
- *     call_id TEXT NOT NULL,
- *     event_type TEXT NOT NULL,
- *     data JSONB NOT NULL,
- *     created_at TIMESTAMPTZ DEFAULT NOW()
- *   );
- * 
- * For now: array in memory, cleared on server restart.
+ * EVENT STORE — persisted to logs/events.json so the dashboard survives server restarts.
  * @type {Array<{id: string, callId: string, type: string, data: any, ts: number}>}
  */
-const eventStore = [];
+let eventStore = [];
 let eventCounter = 0;
+
+// Load persisted events from disk on boot
+try {
+    if (fs.existsSync(EVENTS_FILE)) {
+        eventStore = JSON.parse(fs.readFileSync(EVENTS_FILE, "utf-8"));
+        eventCounter = eventStore.length;
+        console.log(`[WS] Loaded ${eventStore.length} persisted events from disk.`);
+    }
+} catch (e) {
+    console.warn("[WS] Could not load persisted events, starting fresh:", e.message);
+    eventStore = [];
+}
 
 /** @type {Set<import('ws').WebSocket>} */
 const clients = new Set();
@@ -79,8 +88,12 @@ function pushEvent(callId, type, data) {
     eventStore.push(event);
 
     // Keep store bounded — last 500 events max
-    // In production: write to PostgreSQL instead
     if (eventStore.length > 500) eventStore.shift();
+
+    // Persist to disk — survives server restarts
+    try {
+        fs.writeFileSync(EVENTS_FILE, JSON.stringify(eventStore), "utf-8");
+    } catch (e) { /* non-fatal */ }
 
     // Broadcast to all live browser clients
     const message = JSON.stringify({ type: "EVENT", event });
