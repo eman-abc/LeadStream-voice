@@ -164,7 +164,7 @@ async function handleRouting(transcript, currentState) {
 
         default:
             return {
-                content: "Welcome to Dino Software. I'm Evolve. How can I help you today?",
+                content: "Welcome to Dino Software. I'm Alex. How can I help you today?",
                 nextState: CallStateEnum.GREETING,
                 redlined: false,
             };

@@ -1,13 +1,27 @@
 "use strict";
 
 const { Router } = require('express');
+const rateLimit = require('express-rate-limit');
 const { handleRouting: routingHandler } = require("../state-machine/router");
 const { CallState: CallStateMap } = require("../types");
 const { parseEndOfCallReport } = require("../services/leadParser");
 const { dispatchLead } = require("../services/crmMock");
 const { pushEvent } = require("../ws/broadcaster");
+const logger = require("../utils/logger");
 
 const router = Router();
+
+// Constant Configuration
+const VAPI_SECRET = process.env.VAPI_SECRET;
+const SESSION_EXPIRY_MS = 60 * 60 * 1000; // 1 Hour Safety Reaper
+
+// Rate Limiter — prevent DoS on webhook endpoint
+const webhookLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // limit each IP to 100 requests per window
+    message: { error: "Too many requests, please try again later." }
+});
+router.use('/webhook', webhookLimiter);
 
 /** @type {Record<string, string>} */
 const callStateMap = {};
@@ -15,10 +29,27 @@ const callStateMap = {};
 /** @type {Record<string, string>} - Stores last response per call to detect echo */
 const lastResponseMap = {};
 
-/** @type {Set<string>} - Tracks already-processed toolCallIds to prevent duplicate routing */
+/** @type {Record<string, NodeJS.Timeout>} - Safety reapers for abandoned sessions */
+const sessionReapers = {};
+
+/** @type {Set<string>} - Tracks already-processed toolCallIds */
 const processedToolCalls = new Set();
 
-// Events we acknowledge immediately without any routing logic
+/**
+ * cleanUpSession - Ensure no memory leaks when a call ends or is abandoned
+ * @param {string} callId 
+ */
+function cleanUpSession(callId) {
+    if (sessionReapers[callId]) {
+        clearTimeout(sessionReapers[callId]);
+        delete sessionReapers[callId];
+    }
+    delete callStateMap[callId];
+    delete lastResponseMap[callId];
+    logger.info(`Session cleaned up`, { callId });
+}
+
+// Events we acknowledge immediately
 const PASSTHROUGH_EVENTS = new Set([
     "assistant.started",
     "assistant.speechStarted",
@@ -32,30 +63,34 @@ const PASSTHROUGH_EVENTS = new Set([
 ]);
 
 router.post('/webhook', async (req, res) => {
+    // SECURITY: Webhook Secret Verification
+    const incomingSecret = req.headers['x-vapi-secret'];
+    if (VAPI_SECRET && incomingSecret !== VAPI_SECRET) {
+        logger.error("Unauthorized request — VAPI_SECRET mismatch", { incomingSecret });
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+
     const body = req.body || {};
     const message = body.message || {};
     const messageType = message.type || body.type || "";
 
-    // Always log the event type so we can see what's arriving
-    console.log(`[WEBHOOK] ${messageType}`);
+    const callId = body.call?.id || message.call?.id || body.callId || "default";
 
-    // Step 1: passthrough events — respond in <5ms, never touch Groq
+    // Step 1: passthrough events
     if (PASSTHROUGH_EVENTS.has(messageType)) {
         return res.status(200).json({ received: true });
     }
 
-    // Step 2: extract callId
-    const callId =
-        body.call?.id ||
-        message.call?.id ||
-        body.callId ||
-        "default";
+    // Initialize or Reset Safety Reaper for this call
+    if (callId !== "default") {
+        if (sessionReapers[callId]) clearTimeout(sessionReapers[callId]);
+        sessionReapers[callId] = setTimeout(() => cleanUpSession(callId), SESSION_EXPIRY_MS);
+    }
 
-    // Step 3: end-of-call cleanup — no routing needed
+    // Step 3: end-of-call cleanup
     if (messageType === "end-of-call-report") {
-        console.log(`[CALL_END] Processing end-of-call for callId: ${callId}`);
-        
         try {
+            logger.info("Processing end-of-call-report", { callId });
             const payload = parseEndOfCallReport(body);
             dispatchLead(payload);
             pushEvent(callId, "CALL_ENDED", {
@@ -63,117 +98,108 @@ router.post('/webhook', async (req, res) => {
                 summary: payload.summary,
             });
         } catch (err) {
-            console.error("[CALL_END] Lead extraction failed:", err.message);
+            logger.error("Lead extraction failed", { callId, error: err.message });
+        } finally {
+            cleanUpSession(callId);
         }
-        
-        delete callStateMap[callId];
-        delete lastResponseMap[callId]; // kept to prevent memory leak although omitted in instructions
-        console.log(`[CALL_END] State map cleared for callId: ${callId}`);
         return res.status(200).json({ received: true });
     }
 
-    // Step 4: assistant-request — return first message, no Groq
+    // Step 4: assistant-request — SPEAK FIRST logic
     if (messageType === "assistant-request") {
+        const firstMsg = "Welcome to Dino Software. I'm Alex. Are you looking to modernize a legacy system today?";
+        
+        logger.info("Assistant request received — returning firstMessage", { callId });
         pushEvent(callId, "CALL_STARTED", {
             ts: Date.now(),
-            firstMessage: "Welcome to Dino Software. I'm Riley..."
+            firstMessage: "Welcome to Dino Software. I'm Alex..." // Dashboard sync
         });
         
         return res.status(200).json({
-            assistant: {
-                firstMessage: "Welcome to Dino Software. I'm Evolve. Are you looking to modernize a legacy system today?"
-            }
+            assistant: { firstMessage: firstMsg }
         });
     }
 
-    // Step 5: tool-calls — the ONLY event that routes through the brain
+    // Step 5: tool-calls — The "Brain"
     if (messageType === "tool-calls") {
-        let transcript = "";
+        try {
+            let transcript = "";
+            const rawArgs = message.toolCallList?.[0]?.function?.arguments ||
+                          message.toolWithToolCallList?.[0]?.toolCall?.function?.arguments;
 
-        // Grab the raw arguments payload
-        const rawArgs =
-            message.toolCallList?.[0]?.function?.arguments ||
-            message.toolWithToolCallList?.[0]?.toolCall?.function?.arguments;
-
-        // Vapi sends arguments as a JSON string — parse it
-        if (typeof rawArgs === "string") {
-            try {
+            if (typeof rawArgs === "string") {
                 const parsedArgs = JSON.parse(rawArgs);
                 transcript = parsedArgs.Transcript || parsedArgs.transcript || parsedArgs.message || parsedArgs.input || "";
-            } catch (e) {
-                console.error("[ERROR] Failed to parse Vapi tool arguments string.");
+            } else if (rawArgs) {
+                transcript = rawArgs.Transcript || rawArgs.transcript || rawArgs.message || rawArgs.input || "";
             }
-        } else if (rawArgs) {
-            transcript = rawArgs.Transcript || rawArgs.transcript || rawArgs.message || rawArgs.input || "";
-        }
 
-        const toolCallId =
-            message.toolCallList?.[0]?.id ||
-            message.toolWithToolCallList?.[0]?.toolCall?.id ||
-            "unknown";
+            const toolCallId = message.toolCallList?.[0]?.id || 
+                             message.toolWithToolCallList?.[0]?.toolCall?.id || "unknown";
 
-        console.log(`[TOOL_CALL] Extracted Transcript: "${transcript}"`);
+            // Guard 1: Deduplicate
+            if (processedToolCalls.has(toolCallId)) {
+                logger.warn("Duplicate tool-call detected", { callId, toolCallId });
+                return res.status(200).json({ results: [{ toolCallId, result: "" }] });
+            }
+            processedToolCalls.add(toolCallId);
+            if (processedToolCalls.size > 500) processedToolCalls.clear();
 
-        // Guard 1: Deduplicate — skip if we already processed this exact tool call
-        if (processedToolCalls.has(toolCallId)) {
-            console.log(`[DUPLICATE] Skipping already-processed toolCallId: ${toolCallId}`);
-            return res.status(200).json({
-                results: [{ toolCallId, result: "" }]
+            // Guard 2: Empty transcript
+            if (!transcript.trim()) {
+                logger.info("Empty transcript — asking to repeat", { callId });
+                return res.status(200).json({
+                    results: [{ toolCallId, result: "I didn't quite catch that. Could you repeat it?" }]
+                });
+            }
+
+            // Guard 3: Echo detection
+            const lastResponse = lastResponseMap[callId] || "";
+            const normalizedTranscript = transcript.toLowerCase().trim();
+            const normalizedLast = lastResponse.toLowerCase().trim();
+            if (normalizedLast && normalizedLast.startsWith(normalizedTranscript.slice(0, 40))) {
+                logger.warn("Echo detected — skipping routing", { callId, transcript });
+                return res.status(200).json({ results: [{ toolCallId, result: "" }] });
+            }
+
+            // Route through brain
+            const currentState = callStateMap[callId] || CallStateMap.GREETING;
+            logger.info("Routing through state machine", { callId, fromState: currentState, transcript });
+            
+            const result = await routingHandler(transcript, currentState);
+            
+            callStateMap[callId] = result.nextState;
+            lastResponseMap[callId] = result.content;
+
+            pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
+                transcript,
+                response: result.content,
+                fromState: currentState,
+                toState: result.nextState,
+                redlined: result.redlined,
             });
-        }
-        processedToolCalls.add(toolCallId);
-        // Prevent the Set from growing forever on long-running servers
-        if (processedToolCalls.size > 500) processedToolCalls.clear();
 
-        // Guard 2: Empty transcript — ask to repeat
-        if (!transcript.trim()) {
+            logger.info("Brain Response complete", { 
+                callId, 
+                nextState: result.nextState, 
+                redlined: result.redlined 
+            });
+
             return res.status(200).json({
-                results: [{
-                    toolCallId,
-                    result: "I didn't quite catch that. Could you repeat it?"
+                results: [{ toolCallId, result: result.content }]
+            });
+
+        } catch (err) {
+            logger.error("Brain Routing Critical Failure", { callId, error: err.stack });
+            return res.status(200).json({
+                results: [{ 
+                    toolCallId: "fallback", 
+                    result: "I'm having a bit of trouble processing that. Give me just a second?" 
                 }]
             });
         }
-
-        // Guard 3: Echo detection — if transcript matches our last response, it's the assistant's own voice
-        const lastResponse = lastResponseMap[callId] || "";
-        const normalizedTranscript = transcript.toLowerCase().trim();
-        const normalizedLast = lastResponse.toLowerCase().trim();
-        if (normalizedLast && normalizedLast.startsWith(normalizedTranscript.slice(0, 40))) {
-            console.log(`[ECHO_DETECTED] Transcript matches last assistant response — skipping`);
-            return res.status(200).json({
-                results: [{ toolCallId, result: "" }]
-            });
-        }
-
-        // Route the real transcript through the brain
-        const currentState = callStateMap[callId] || CallStateMap.GREETING;
-        const result = await routingHandler(transcript, currentState);
-        callStateMap[callId] = result.nextState;
-        lastResponseMap[callId] = result.content;
-
-        pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
-            transcript,
-            response: result.content,
-            fromState: currentState,
-            toState: result.nextState,
-            redlined: result.redlined,
-        });
-
-        console.log(`[STATE]    ${currentState} → ${result.nextState}`);
-        console.log(`[REDLINED] ${result.redlined}`);
-        console.log(`[RESPONSE] "${result.content}"`);
-
-        return res.status(200).json({
-            results: [{
-                toolCallId,
-                result: result.content
-            }]
-        });
     }
 
-    // Step 6: anything else we haven't handled — fast 200, never Groq
-    console.log(`[UNHANDLED] ${messageType} — returning 200`);
     return res.status(200).json({ received: true });
 });
 
