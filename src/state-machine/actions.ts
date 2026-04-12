@@ -3,110 +3,122 @@
 const Groq = require("groq-sdk");
 const { knowledgeBase } = require("../data/knowledgeLoader");
 
-// Stop sequences — hard mechanical fence, max 4 (Groq API limit).
-// If the model tries to write a simulated user turn, generation halts immediately.
-const STOP_SEQUENCES = ["\nUser:", "\nCaller:", "User:", "Human:"];
+// Stop sequences — max 4 limits for Groq API
+const STOP_SEQUENCES = ["\nUser:", "\nCaller:", "User:", "\n\n"];
 
 /**
- * Build a system prompt that injects known entity context so the LLM
- * never re-asks for name/email that the caller has already provided.
- * @param {{ name?: string, email?: string }} context
+ * buildSystemPrompt — clean, priority-ordered rules.
+ * Fewer rules = better compliance from small models.
  */
 function buildSystemPrompt(context) {
     context = context || {};
-    const entityBlock = [];
+
+    // Build entity awareness block — only shown when entities are known
+    const knownEntities = [];
     if (context.name && context.name !== "Unknown") {
-        entityBlock.push(`- Caller name already captured: "${context.name}" — do NOT ask for it again.`);
+        knownEntities.push(`Name: "${context.name}"`);
     }
     if (context.email && context.email.length > 0) {
-        entityBlock.push(`- Caller email already captured: "${context.email}" — do NOT ask for it again.`);
+        knownEntities.push(`Email: "${context.email}"`);
     }
 
-    const entitySection = entityBlock.length
-        ? `\nKNOWN CALLER ENTITIES (do NOT re-collect these):\n${entityBlock.join("\n")}\n`
-        : "";
+    const entityBlock = knownEntities.length > 0
+        ? `\nYOU ALREADY KNOW THIS ABOUT THE CALLER — never ask for these again:\n${knownEntities.join("\n")}\n`
+        : "\nYou have not yet captured the caller's name or email.\n";
 
-    return `You are Alex, the AI receptionist for Dino Software.
+    return `You are Alex, a professional receptionist for Dino Software.
+Dino Software helps enterprises migrate legacy systems (COBOL, Mainframe, old Java) to modern stacks using AI-assisted tools: DinoScan, DinoMigrate, and DinoGuard.
 
-Dino Software modernizes legacy enterprise systems (COBOL, Mainframe, old Java) using Agentic AI. Your three products are DinoScan, DinoMigrate, and DinoGuard.
+YOUR VOICE AND STYLE:
+- Warm, confident, and concise. This is a phone call — 1-2 sentences per reply only.
+- You are a receptionist, not an engineer. You connect callers to the right people.
+- Never use filler phrases like "Great question!" or "Absolutely!".
+- Never claim to have done something you cannot do (scheduling, booking, sending emails).
+  Say "I'll make sure a specialist reaches out" — not "I've scheduled a call for you."
 
-STRICT RULES:
-1. Answer ONLY using the knowledge base provided below. Never invent facts.
-2. This is a LIVE phone call API. You receive ONE caller utterance per request. Respond with ONE reply only.
-3. Keep your response under 2 sentences. Be direct and concise.
-4. Never mention competitors, pricing not in the KB, or internal company details.
-5. If the question cannot be answered from the KB, say: "That's a great question — let me have a solutions architect follow up with you directly. Could I get your name and email?"
-6. Always end product answers by offering to book a consultation.
-7. NEVER write "User:", "Caller:", or "Human:" — you are only Alex. Stop after your single reply.
-8. Do NOT ask for information the caller has already provided.
-9. AGGRESSIVE CAPTURE: If the caller declines a consultation (says "no", "not now", "maybe later"), ask ONE more time: "No problem — could I at least send you a free technical whitepaper on legacy modernisation? I just need your email." Always attempt to capture an email before the call ends.
-${entitySection}
-KNOWLEDGE BASE:
+WHAT YOU CAN DO:
+- Answer questions about DinoScan, DinoMigrate, DinoGuard using the knowledge base below.
+- Explain what Dino Software does at a high level.
+- Capture the caller's name and email so a specialist can follow up.
+- Offer to connect the caller with a solutions architect.
+
+WHAT YOU CANNOT DO — handle these with a single honest sentence then redirect:
+- Compare Dino Software to any competitor (IBM, Kyndryl, Accenture, etc.)
+  → Say: "I'm not the right person to make that comparison — our solutions architect 
+    can walk you through how we approach migration differently."
+- Quote specific timelines, guarantees, or ROI figures not in the knowledge base.
+  → Say: "I wouldn't want to give you an inaccurate figure — let me get a specialist 
+    to give you the real numbers."
+- Discuss pricing, discounts, or contract terms.
+  → Say: "Pricing is scoped per engagement — a quick call with our team will give 
+    you an accurate picture."
+- Make any claims about risk, safety, or superiority over competitors.
+
+CONTACT CAPTURE RULES — follow this priority exactly:
+1. If you already know the caller's name AND email (see block below), do NOT ask again.
+   Acknowledge by name if natural. Confirm their email only if they seem confused.
+2. If you are missing name or email, ask for whichever is missing — one field at a time.
+3. If the caller declines contact capture once, make one gentle second attempt:
+   "No problem — if you change your mind, I can at least send a free legacy 
+   modernisation overview to your email. Totally up to you."
+4. If they decline twice, drop it gracefully and close warmly.
+${entityBlock}
+KNOWLEDGE BASE — answer product questions from this only:
 ${knowledgeBase}`;
 }
 
 /**
- * queryGroq — calls Groq with the full conversation history for accurate context,
- * stop sequences to prevent autocomplete hallucination, and a structural user-message
- * instruction that enforces single-turn output.
- *
- * @param {string} transcript - The current user utterance
- * @param {Array<{role: string, content: string}>} [history] - Prior conversation turns
- * @param {{ name?: string, email?: string }} [context] - Already-known caller entities
- * @returns {Promise<string>} Alex's spoken response
+ * queryGroq — sends conversation history + current turn to Groq.
+ * History gives the model full context so it cannot "forget" captured entities.
  */
 async function queryGroq(transcript, history, context) {
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const startTime = Date.now();
 
-    // OPTION 3 — Structural user message: append a single explicit stop instruction
-    // at the point closest to generation. This is the most proximate constraint.
-    const userMessage = `${transcript}\n\n[Respond with ONLY your next spoken line. Stop after one response. Do not write "User:" or "Caller:".]`;
-
-    // OPTION 1 — Full conversation history as messages[]
-    // Build the Groq messages array: system + prior turns + current user message.
-    // Prior turns give the model full context so it can't "autocomplete" the conversation.
     const priorMessages = (history || []).map(turn => ({
         role: turn.role === "bot" ? "assistant" : "user",
         content: turn.content,
     }));
 
+    // Keep history bounded — last 10 turns max to avoid context bloat
+    const boundedHistory = priorMessages.slice(-10);
+
     const messages = [
         { role: "system", content: buildSystemPrompt(context) },
-        ...priorMessages,
-        { role: "user", content: userMessage },
+        ...boundedHistory,
+        {
+            role: "user",
+            content: transcript
+        },
     ];
 
     try {
         const completion = await groq.chat.completions.create({
             model: "llama-3.1-8b-instant",
             messages,
-            max_tokens: 100,    // ~2 sentences max — hard ceiling
-            temperature: 0.1,   // Deterministic, not creative
+            max_tokens: 120,
+            temperature: 0.2,   // Slight warmth — pure 0.1 sounds robotic
             stream: false,
-            // OPTION 2 — Stop sequences: hard mechanical fence
-            // If the model tries to write "User:" it stops generation immediately.
             stop: STOP_SEQUENCES,
         });
 
         const raw = completion.choices[0]?.message?.content?.trim()
             ?? "Let me have a specialist follow up with you on that.";
 
-        // Post-process: strip any leaked role labels that slipped past the stop sequences
+        // Strip any leaked role labels
         const response = raw
-            .replace(/^(Alex:|Assistant:|Bot:)\s*/i, "")
+            .replace(/^(Alex:|Assistant:|Bot:|A:)\s*/i, "")
+            .replace(/\n[\s\S]*/g, "") // strip anything after first newline
             .trim();
 
         const latency = Date.now() - startTime;
-        console.log(`[GROQ] Responded in ${latency}ms | turns_in_context=${priorMessages.length}`);
-        console.log(`[GROQ] Response: "${response}"`);
+        console.log(`[GROQ] ${latency}ms | context=${boundedHistory.length} turns | "${response}"`);
 
         return response;
 
     } catch (err) {
-        const latency = Date.now() - startTime;
-        console.error(`[GROQ] Error after ${latency}ms:`, err.message);
-        return "I'm having a little trouble with that right now. Could I take your details and have a specialist call you back?";
+        console.error(`[GROQ] Error:`, err.message);
+        return "I'm having a little trouble right now — could I take your details and have someone call you back?";
     }
 }
 
