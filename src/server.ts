@@ -1,6 +1,6 @@
 "use strict";
-
-const dotenv = require('dotenv');
+import dotenv from 'dotenv';
+dotenv.config(); // Loads the .env file FIRST
 const express = require('express');
 const vapiRouter = require('./controllers/vapiController');
 const { initWebSocketServer, getEventStore } = require("./ws/broadcaster");
