@@ -106,7 +106,30 @@ router.post('/webhook', async (req, res) => {
             const historyTranscript = history
                 .map(t => `${t.role === "user" ? "User" : "Alex"}: ${t.content}`)
                 .join("\n");
+            
             const payload = parseEndOfCallReport(body, historyTranscript);
+
+            // Refined extraction via Groq for accurate results over regex
+            try {
+                const Groq = require("groq-sdk");
+                const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+                const prompt = `Extract the caller's name and email from this transcript. Return ONLY a JSON object: {"name": "...", "email": "..."}. If not found, use "Unknown"\n\nTranscript:\n${historyTranscript || payload.summary}`;
+                
+                const completion = await groq.chat.completions.create({
+                    model: "llama-3.1-8b-instant",
+                    messages: [{ role: "user", content: prompt }],
+                    temperature: 0.1,
+                    response_format: { type: "json_object" }
+                });
+
+                const rawJson = completion.choices[0]?.message?.content?.trim() || "{}";
+                const extracted = JSON.parse(rawJson);
+                if (extracted.name && extracted.name !== "Unknown") payload.customer.name = extracted.name;
+                if (extracted.email && extracted.email !== "Unknown") payload.customer.email = extracted.email;
+            } catch (llmErr) {
+                logger.warn("Groq entity extraction failed, falling back to regex", { callId, error: llmErr.message });
+            }
+
             dispatchLead(payload);
             pushEvent(callId, "CALL_ENDED", {
                 lead: payload,
