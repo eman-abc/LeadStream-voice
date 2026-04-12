@@ -5,6 +5,7 @@ const { handleRouting: routingHandler } = require("../state-machine/router");
 const { CallState: CallStateMap } = require("../types");
 const { parseEndOfCallReport } = require("../services/leadParser");
 const { dispatchLead } = require("../services/crmMock");
+const { pushEvent } = require("../ws/broadcaster");
 
 const router = Router();
 
@@ -57,6 +58,10 @@ router.post('/webhook', async (req, res) => {
         try {
             const payload = parseEndOfCallReport(body);
             dispatchLead(payload);
+            pushEvent(callId, "CALL_ENDED", {
+                lead: payload,
+                summary: payload.summary,
+            });
         } catch (err) {
             console.error("[CALL_END] Lead extraction failed:", err.message);
         }
@@ -69,6 +74,11 @@ router.post('/webhook', async (req, res) => {
 
     // Step 4: assistant-request — return first message, no Groq
     if (messageType === "assistant-request") {
+        pushEvent(callId, "CALL_STARTED", {
+            ts: Date.now(),
+            firstMessage: "Welcome to Dino Software. I'm Riley..."
+        });
+        
         return res.status(200).json({
             assistant: {
                 firstMessage: "Welcome to Dino Software. I'm Evolve. Are you looking to modernize a legacy system today?"
@@ -141,6 +151,14 @@ router.post('/webhook', async (req, res) => {
         const result = await routingHandler(transcript, currentState);
         callStateMap[callId] = result.nextState;
         lastResponseMap[callId] = result.content;
+
+        pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
+            transcript,
+            response: result.content,
+            fromState: currentState,
+            toState: result.nextState,
+            redlined: result.redlined,
+        });
 
         console.log(`[STATE]    ${currentState} → ${result.nextState}`);
         console.log(`[REDLINED] ${result.redlined}`);

@@ -91,7 +91,7 @@ cvision-triage-native/
     │   ├── leadParser.ts         # Extracts typed fields from VAPI transcript
     │   └── crmMock.ts            # Console-formatted CRM + WhatsApp simulation
     └── data/
-        └── knowledge.json        # Apex Software FAQ, pricing, redline triggers
+        └── knowledge.json        # dino Software FAQ, pricing, redline triggers
 ```
 
 **Why this structure matters:** Each file has exactly one job. `vapiController.ts` never calls Groq directly. `router.ts` never touches the HTTP request object. This is the separation that makes the codebase walkable in a 30-minute interview.
@@ -137,7 +137,7 @@ export interface LeadPayload {
 
 ```json
 {
-  "company": "Apex Software",
+  "company": "dino Software",
   "product": "B2B SaaS workflow automation platform",
   "pricing": {
     "starter": "$299/month — up to 5 users, core automation features",
@@ -150,8 +150,8 @@ export interface LeadPayload {
     "Role-based access control",
     "Audit logs and compliance exports"
   ],
-  "demo": "Book at apex.software/demo — 30-minute live walkthrough with a product specialist",
-  "support": "support@apexsoftware.com — response within 4 business hours",
+  "demo": "Book at dino.software/demo — 30-minute live walkthrough with a product specialist",
+  "support": "support@dinosoftware.com — response within 4 business hours",
   "redline_topics": [
     "investor",
     "funding",
@@ -320,7 +320,7 @@ export async function route(
   switch (state) {
     case CallState.GREETING:
       return {
-        response: "Welcome to Apex Software. I can help with product information, "
+        response: "Welcome to dino Software. I can help with product information, "
                 + "pricing, or booking a demo. What brings you in today?",
         nextState: detectIntent(transcript),
         redlined: false,
@@ -344,7 +344,7 @@ export async function route(
 
     case CallState.END_CALL:
       return {
-        response: "Thanks so much for calling Apex Software. We'll be in touch soon.",
+        response: "Thanks so much for calling dino Software. We'll be in touch soon.",
         nextState: CallState.END_CALL,
         redlined: false,
       };
@@ -384,7 +384,7 @@ export async function queryGroq(
     messages: [
       {
         role: 'system',
-        content: `You are a professional receptionist for Apex Software. 
+        content: `You are a professional receptionist for dino Software. 
 Answer only using the knowledge base below. 
 Be concise — this is a phone call. Max 2 sentences.
 If the answer is not in the knowledge base, say you will have a specialist follow up.
@@ -577,7 +577,7 @@ Step 3 — Add REDLINE detection
 
 Step 4 — Add Groq + knowledge.json
   ✓ actions.ts: queryGroq() implemented
-  ✓ knowledge.json populated with Apex Software data
+  ✓ knowledge.json populated with dino Software data
   ✓ INFO_SEARCH case calls queryGroq
   ✓ Test: ask "what is the pricing?" → real answer from KB
 
