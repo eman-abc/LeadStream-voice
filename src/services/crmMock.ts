@@ -1,5 +1,7 @@
 "use strict";
 
+const logger = require("../utils/logger").default;
+
 /**
  * dispatchLead — formats and logs the lead payload as mock CRM + WhatsApp output.
  * This is the "Post-Call Value" proof artifact for the interview demo.
@@ -38,6 +40,14 @@ function dispatchLead(payload) {
     console.log(`\n  [SUMMARY]`);
     console.log(`  "${payload.summary.slice(0, 120)}..."`);
     console.log(`\n${LINE}\n`);
+
+    // Structured log for observability / persistence 🫧
+    logger.info("Lead dispatched to CRM", {
+        customer: payload.customer,
+        intent: payload.intent,
+        redlineFlagged: payload.redlineFlagged,
+        summary: payload.summary,
+    });
 }
 
 module.exports = { dispatchLead };

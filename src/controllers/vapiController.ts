@@ -11,7 +11,8 @@ const { dispatchLead } = require("../services/crmMock");
 const { extractControlUrl, queueLlmTurn } = require("../services/asyncLlmQueue");
 const { getCallSessionStore } = require("../services/callSessionStore");
 const { pushEvent } = require("../ws/broadcaster");
-const logger = require("../utils/logger");
+const logger = require("../utils/logger").default;
+const { runWithContext } = require("../utils/context");
 
 const LOGS_DIR = path.join(__dirname, "../../logs");
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -41,7 +42,7 @@ const PASSTHROUGH_EVENTS = new Set([
 async function cleanUpSession(callId) {
     const sessionStore = await getCallSessionStore();
     await sessionStore.clearSession(callId);
-    logger.info("Session cleaned up", { callId });
+    logger.info("Session cleaned up");
 }
 
 function getToolTranscript(message) {
@@ -66,12 +67,13 @@ function getToolCallId(message) {
         "unknown";
 }
 
-router.post("/webhook", async (req, res) => {
+// All business logic is extracted so it runs inside the AsyncLocalStorage context
+async function handleWebhook(req, res) {
     const incomingSecret = req.headers["x-vapi-secret"];
     if (VAPI_SECRET && incomingSecret !== VAPI_SECRET) {
-        logger.error("Unauthorized request - VAPI_SECRET mismatch", { incomingSecret });
+        logger.error("Unauthorized request - VAPI_SECRET mismatch");
         if (!incomingSecret) {
-            logger.warn("Bypassing strict VAPI_SECRET check because incoming secret is empty. (Ensure you add it in the Vapi Dashboard for production!)");
+            logger.warn("Bypassing strict VAPI_SECRET check because incoming secret is empty.");
         } else {
             return res.status(401).json({ error: "Unauthorized" });
         }
@@ -93,10 +95,8 @@ router.post("/webhook", async (req, res) => {
     }
 
     if (messageType === "end-of-call-report") {
-        console.log(`[DEBUG] Received End of Call Report for callId: ${callId}`);
+        logger.info("Received End of Call Report");
         try {
-            logger.info("Processing end-of-call-report", { callId });
-
             const history = await sessionStore.getHistory(callId);
             const historyTranscript = history
                 .map((turn) => `${turn.role === "user" ? "User" : "Alex"}: ${turn.content}`)
@@ -142,7 +142,7 @@ router.post("/webhook", async (req, res) => {
                 });
                 summary = summaryGen.choices[0].message.content.trim();
             } catch (llmErr) {
-                logger.warn("Groq entity/summary extraction failed, falling back", { callId, error: llmErr.message });
+                logger.warn("Groq extraction failed", { error: llmErr.message });
             }
 
             payload.customer.name = extractedName !== "Unknown" ? extractedName : payload.customer.name;
@@ -161,9 +161,9 @@ router.post("/webhook", async (req, res) => {
             try {
                 const logPath = path.join(LOGS_DIR, `${callId}.json`);
                 await fs.promises.writeFile(logPath, JSON.stringify(callLog, null, 2), "utf-8");
-                console.log(`[LOG] Call log saved -> logs/${callId}.json`);
+                logger.info("Call log saved", { path: `logs/${callId}.json` });
             } catch (writeErr) {
-                logger.warn("Failed to write call log file", { callId, error: writeErr.message });
+                logger.warn("Failed to write call log file", { error: writeErr.message });
             }
 
             dispatchLead(payload);
@@ -172,7 +172,7 @@ router.post("/webhook", async (req, res) => {
                 summary,
             });
         } catch (err) {
-            logger.error("Lead extraction failed", { callId, error: err.message });
+            logger.error("Lead extraction failed", { error: err.message });
         } finally {
             await cleanUpSession(callId);
         }
@@ -184,7 +184,7 @@ router.post("/webhook", async (req, res) => {
         const firstMsg = "Welcome to Dino Software. I'm Alex. Are you looking to modernize a legacy system today?";
 
         await sessionStore.setCallState(callId, CallStateMap.GREETING);
-        logger.info("Assistant request received - returning firstMessage", { callId });
+        logger.info("Assistant request received");
         pushEvent(callId, "CALL_STARTED", {
             ts: Date.now(),
             firstMessage: "Welcome to Dino Software. I'm Alex...",
@@ -202,7 +202,7 @@ router.post("/webhook", async (req, res) => {
             const acceptedToolCall = await sessionStore.markToolCallProcessed(callId, toolCallId);
 
             if (!acceptedToolCall) {
-                logger.warn("Duplicate tool-call detected", { callId, toolCallId });
+                logger.warn("Duplicate tool-call detected", { toolCallId });
                 return res.status(202).json({
                     received: true,
                     queued: false,
@@ -218,13 +218,15 @@ router.post("/webhook", async (req, res) => {
                 controlUrl,
             });
 
+            logger.info("Tool call queued", { toolCallId });
+
             return res.status(202).json({
                 received: true,
                 queued: true,
                 results: [{ toolCallId, result: "" }],
             });
         } catch (err) {
-            logger.error("Async queueing failure", { callId, error: err.stack });
+            logger.error("Async queueing failure", { error: err.stack });
             return res.status(200).json({
                 results: [{
                     toolCallId: "fallback",
@@ -235,6 +237,15 @@ router.post("/webhook", async (req, res) => {
     }
 
     return res.status(200).json({ received: true });
+}
+
+router.post("/webhook", async (req, res) => {
+    const body = req.body || {};
+    const message = body.message || {};
+    const callId = body.call?.id || message.call?.id || body.callId || "default";
+
+    // Wrap the entire request in the context bubble 🫧
+    return runWithContext(callId, () => handleWebhook(req, res));
 });
 
 module.exports = router;

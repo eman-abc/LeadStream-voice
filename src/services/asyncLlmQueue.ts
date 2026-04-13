@@ -6,7 +6,8 @@ const { extractName, extractEmail } = require("./leadParser");
 const { getCallSessionStore } = require("./callSessionStore");
 const { injectAssistantMessage } = require("./vapiLiveControl");
 const { pushEvent } = require("../ws/broadcaster");
-const logger = require("../utils/logger");
+const logger = require("../utils/logger").default;
+const { runWithContext } = require("../utils/context");
 
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 500;
@@ -57,33 +58,33 @@ async function processQueuedResponses(callId) {
             const job = await sessionStore.dequeueResponseJob(callId);
             if (!job) return;
 
-            try {
-                await processSingleJob(job);
-            } catch (error) {
-                const attempts = (job.attempts || 0) + 1;
-                logger.error("Async LLM job failed", {
-                    callId,
-                    toolCallId: job.toolCallId,
-                    attempts,
-                    error: error.message,
-                });
-
-                if (attempts < MAX_RETRY_ATTEMPTS) {
-                    await sessionStore.prependResponseJob(callId, {
-                        ...job,
-                        attempts,
-                        lastError: error.message,
-                    });
-                    scheduleRetry(callId, attempts);
-                } else {
-                    pushEvent(callId, "BOT_RESPONSE_FAILED", {
+            // Wrap each popped job in its own context bubble so logs and traces track the job
+            await runWithContext(callId, async () => {
+                try {
+                    await processSingleJob(job);
+                } catch (error: any) {
+                    const attempts = (job.attempts || 0) + 1;
+                    logger.error("Async LLM job failed", {
                         toolCallId: job.toolCallId,
+                        attempts,
                         error: error.message,
                     });
-                }
 
-                return;
-            }
+                    if (attempts < MAX_RETRY_ATTEMPTS) {
+                        await sessionStore.prependResponseJob(callId, {
+                            ...job,
+                            attempts,
+                            lastError: error.message,
+                        });
+                        scheduleRetry(callId, attempts);
+                    } else {
+                        pushEvent(callId, "BOT_RESPONSE_FAILED", {
+                            toolCallId: job.toolCallId,
+                            error: error.message,
+                        });
+                    }
+                }
+            });
         }
     } finally {
         await sessionStore.releaseResponseWorkerLock(callId, lockToken);
@@ -117,7 +118,7 @@ async function processSingleJob(job) {
         normalizedLast === normalizedTranscript ||
         (normalizedLast.includes(normalizedTranscript) && normalizedTranscript.length > 20)
     )) {
-        logger.warn("Async queue skipped echoed transcript", { callId: job.callId, transcript });
+        logger.warn("Async queue skipped echoed transcript", { transcript });
         return;
     }
 
@@ -129,7 +130,7 @@ async function processSingleJob(job) {
 
     const conversationHistory = await sessionStore.appendHistory(job.callId, { role: "user", content: transcript });
     const fromState = currentState || CallStateMap.GREETING;
-    logger.info("Routing through async state machine", { callId: job.callId, fromState, transcript });
+    logger.info("Routing through async state machine", { fromState, transcript });
 
     const result = await routingHandler(transcript, fromState, entities, conversationHistory);
 
@@ -159,7 +160,6 @@ async function processSingleJob(job) {
     });
 
     logger.info("Async LLM response injected", {
-        callId: job.callId,
         nextState: result.nextState,
         redlined: result.redlined,
     });

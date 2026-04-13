@@ -1,6 +1,8 @@
 "use strict";
+
 const dotenv = require('dotenv');
 dotenv.config(); // Loads the .env file FIRST
+
 const express = require('express');
 const vapiRouter = require('./controllers/vapiController');
 const { initAsyncLlmQueue } = require("./services/asyncLlmQueue");
@@ -8,10 +10,11 @@ const { initCallSessionStore } = require("./services/callSessionStore");
 const { initWebSocketServer, getEventStore } = require("./ws/broadcaster");
 const http = require("http");
 const path = require("path");
+const logger = require("./utils/logger").default;
 
 // Load environment variables from .env file
 dotenv.config();
-console.log("[ENV] GROQ_API_KEY loaded:", !!process.env.GROQ_API_KEY);
+logger.info("[ENV] GROQ_API_KEY loaded", { present: !!process.env.GROQ_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,18 +25,16 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.use(express.static(path.join(__dirname, "../public")));
 
-app.set('trust proxy', 1); // 👈 Add this line
+app.set('trust proxy', 1);
 
 app.get("/", (req, res) => {
     res.redirect("/dashboard");
 });
 
 // --- Chrome DevTools Silencer ---
-// Chrome automatically looks for this file. We give it an empty JSON object to stop the 404/CSP errors.
 app.get('/.well-known/appspecific/com.chrome.devtools.json', (req, res) => {
     res.status(200).json({});
 });
-
 
 // HTTP fallback for event history (polling)
 app.get("/api/events", (req, res) => {
@@ -45,18 +46,17 @@ app.use('/vapi', vapiRouter);
 
 // Health check — visible in browser
 app.get("/health", (req, res) => {
-    res.json({ status: "ok", service: "Dino Triage Platform", ts: Date.now() });
-
+    res.json({ status: "ok", service: "LeadStream Voice", ts: Date.now() });
 });
 
 app.get("/dashboard", (req, res) => {
     res.sendFile(path.join(__dirname, "../public/dashboard.html"));
 });
+
 // Start server
 const httpServer = http.createServer(app);
 initWebSocketServer(httpServer);
 const ready = initCallSessionStore().then(() => initAsyncLlmQueue());
-
 
 module.exports = { app, httpServer, ready };
 
@@ -64,13 +64,15 @@ if (process.env.NODE_ENV !== 'test') {
     ready
         .then(() => {
             httpServer.listen(PORT, () => {
-                console.log(`✓ Dino Triage Platform listening on port ${PORT}`);
-                console.log(`✓ Webhook endpoint: POST http://localhost:${PORT}/vapi/webhook`);
-                console.log(`✓ Dashboard: http://localhost:${PORT}/dashboard`);
+                logger.info("LeadStream Voice started", {
+                    port: PORT,
+                    webhook: `http://localhost:${PORT}/vapi/webhook`,
+                    dashboard: `http://localhost:${PORT}/dashboard`,
+                });
             });
         })
         .catch((error) => {
-            console.error("[BOOT] Failed to initialize call session store:", error.message);
+            logger.error("Failed to initialize call session store", { error: error.message });
             process.exit(1);
         });
 }
