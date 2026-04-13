@@ -104,9 +104,9 @@ describe("WebSocket Dashboard Integration", () => {
             .post("/vapi/webhook")
             .set("x-vapi-secret", process.env.VAPI_SECRET || "")
             .send(payload)
-            .expect(200);
+            .expect(202);
 
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 150));
 
         const eventMsgs = receivedMessages.filter(m => m.type === "EVENT");
         // We now emit BOT_RESPONSE as well, so there should be 2 events here.
@@ -140,7 +140,7 @@ describe("WebSocket Dashboard Integration", () => {
             .send(payload)
             .expect(200);
 
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 150));
 
         const eventMsgs = receivedMessages.filter(m => m.type === "EVENT");
         // Depending on timing, you might get HISTORY replays or other streams natively, but we cleared the arr.

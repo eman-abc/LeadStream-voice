@@ -90,6 +90,7 @@ Redline responses bypass Groq entirely — those return in **< 100 ms**.
 - **Groq-powered answers** — `llama-3.1-8b-instant` answers product/pricing questions grounded in a local JSON knowledge base.
 - **Post-call lead extraction** — a second Groq pass extracts customer name, email, and a 1-sentence call summary from the transcript.
 - **Redis-backed call sessions** — per-call state, entities, history, dedupe, and echo suppression survive deploys and allow multi-instance webhook handling.
+- **Async LLM injection** — `tool-calls` webhooks ack immediately, then a per-call Redis queue routes and injects the spoken reply out-of-band via Vapi live call control.
 - **Disk persistence** — every call produces a `logs/<callId>.json` file that survives server restarts.
 - **Live dashboard** — `public/dashboard.html` receives push updates over WebSocket; shows call state, transcript turns, bot responses, and surfaced lead data.
 - **Rate limiting** — `express-rate-limit` on the `/vapi/webhook` endpoint.
@@ -179,22 +180,27 @@ leadstream-voice/
 4. vapiController.ts
    ├── Verify VAPI_SECRET header
    ├── Deduplicate toolCallId via Redis NX key
+   ├── Persist `monitor.controlUrl` for later live injection
+   ├── Push the turn onto Redis `call:{callId}:response-queue`
+   └── Return `202 Accepted` within the webhook timeout window
+5. Background queue worker
    ├── Echo-suppress repeated transcript via Redis last-response
    ├── Inline entity extraction (name, email) → Redis `call:{callId}:entities`
    ├── Append to Redis `call:{callId}:history`
-   └── Call router.ts(state, transcript, entities, history)
-5. router.ts
+   ├── Call router.ts(state, transcript, entities, history)
+   └── Inject the final spoken reply through Vapi live call control
+6. router.ts
    ├── REDLINE keyword check (runs FIRST, no Groq)
    └── switch(CallState)
          GREETING        → welcome script + detectIntent()
          INFO_SEARCH     → queryGroq(transcript, knowledge.json)
          DATA_COLLECTION → data-collection prompt
          END_CALL        → closing script
-6. vapiController.ts
+7. Async worker
    ├── Update Redis `call:{callId}:state`
    ├── Push TURN / REDLINE event over WebSocket
-   └── Return { results: [{ toolCallId, result: responseText }] }
-7. ElevenLabs (via VAPI) speaks response to caller
+   └── Trigger Vapi to speak the injected response
+8. ElevenLabs (via VAPI) speaks response to caller
 ```
 
 ### Post-call (Phase B)
@@ -266,7 +272,7 @@ Any transcript containing one of these keywords triggers an immediate hardcoded 
 | Event type | Action |
 |---|---|
 | `assistant-request` | Returns `{ assistant: { firstMessage } }` — Alex's opening line |
-| `tool-calls` | Routes through state machine; returns `{ results: [{ toolCallId, result }] }` |
+| `tool-calls` | Queues the turn and returns `202 Accepted`; the response is injected later via Vapi live call control |
 | `end-of-call-report` | Triggers Phase B lead pipeline |
 | `transcript`, `speech-update`, `status-update`, `conversation-update`, `hang`, `transfer-update`, `user-interrupted` | Acknowledged with `{ received: true }` (passthrough) |
 
@@ -280,6 +286,7 @@ Any transcript containing one of these keywords triggers an immediate hardcoded 
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PORT=3000
 VAPI_SECRET=your_webhook_secret_here
+VAPI_API_KEY=
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -289,6 +296,7 @@ REDIS_URL=redis://localhost:6379
 GROQ_API_KEY=
 PORT=3000
 VAPI_SECRET=
+VAPI_API_KEY=
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -297,6 +305,7 @@ REDIS_URL=redis://localhost:6379
 | `GROQ_API_KEY` | **Yes** | API key from [console.groq.com](https://console.groq.com) |
 | `PORT` | No | HTTP port; defaults to `3000` |
 | `VAPI_SECRET` | Recommended | Secret set in VAPI dashboard → Server URL headers; validated on every webhook |
+| `VAPI_API_KEY` | Recommended | Used to recover a call's `monitor.controlUrl` if the webhook payload omits it |
 | `REDIS_URL` | **Yes** (except tests) | Redis connection string for durable call session storage |
 
 ---
@@ -323,7 +332,7 @@ npm install
 
 ```bash
 cp .env.example .env
-# Edit .env — add GROQ_API_KEY, REDIS_URL, and optionally VAPI_SECRET
+# Edit .env — add GROQ_API_KEY, REDIS_URL, and optionally `VAPI_SECRET` / `VAPI_API_KEY`
 ```
 
 ### 3. Start the dev server
@@ -357,8 +366,8 @@ In your [VAPI dashboard](https://dashboard.vapi.ai):
 Terminal 1 (dev server):
   [ENV] GROQ_API_KEY loaded: true
   ✓ assistant-request received → firstMessage sent
-  ✓ tool-calls received → routing → GREETING
-  ✓ tool-calls received → routing → INFO_SEARCH
+  ✓ tool-calls received → queued → 202 Accepted
+  ✓ async worker routed turn → injected live response
   [LOG] Call log saved → logs/<callId>.json
 
 Terminal 2 (browser):
@@ -408,7 +417,7 @@ The Dockerfile uses a multi-stage build:
 
 - [ ] Push repo to GitHub
 - [ ] Create new **Web Service** on [Render](https://render.com) → connect repo
-- [ ] Set env vars in Render dashboard: `GROQ_API_KEY`, `VAPI_SECRET`, `REDIS_URL`, `PORT=3000`
+- [ ] Set env vars in Render dashboard: `GROQ_API_KEY`, `VAPI_SECRET`, `VAPI_API_KEY`, `REDIS_URL`, `PORT=3000`
 - [ ] Render auto-detects Dockerfile and builds
 - [ ] Copy your public Render URL (e.g. `https://leadstream-voice.onrender.com`)
 - [ ] Update VAPI Server URL to `https://leadstream-voice.onrender.com/vapi/webhook`

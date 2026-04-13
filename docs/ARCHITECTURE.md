@@ -184,9 +184,13 @@ export interface LeadPayload {
         │
         ▼
 4. vapiController.ts receives request
+   - Persists `monitor.controlUrl` if present
+   - Queues the turn in Redis and returns `202 Accepted`
+5. Background worker
    - Reads current CallState from Redis (`call:{callId}:state`)
    - Loads entities/history from Redis (`call:{callId}:entities`, `call:{callId}:history`)
    - Calls router.ts with (state, transcript)
+   - Injects the spoken reply through Vapi live call control
         │
         ▼
 5. router.ts evaluates
@@ -199,7 +203,7 @@ export interface LeadPayload {
          END_CALL        → Return closing script
         │
         ▼
-6. vapiController.ts returns { result: responseText } to VAPI
+6. Worker injects the response back into the live call via Vapi controlUrl
         │
         ▼
 7. ElevenLabs (via VAPI) speaks the response to the caller
@@ -415,7 +419,7 @@ ${JSON.stringify(knowledgeBase, null, 2)}`,
 | File | Single responsibility | Calls | Never calls |
 |---|---|---|---|
 | `server.ts` | Express init, mount routes | — | Business logic |
-| `vapiController.ts` | Parse VAPI webhook, orchestrate Redis-backed call session state | `router.ts`, `leadParser.ts`, `crmMock.ts`, `callSessionStore.ts` | Groq, knowledge.json |
+| `vapiController.ts` | Parse VAPI webhook, enqueue async turn processing, orchestrate call lifecycle | `asyncLlmQueue.ts`, `leadParser.ts`, `crmMock.ts`, `callSessionStore.ts` | Groq, knowledge.json |
 | `router.ts` | Evaluate state + transcript → response + nextState | `actions.ts` | HTTP layer |
 | `actions.ts` | Groq API call + prompt assembly | Groq SDK | State machine |
 | `leadParser.ts` | Extract typed fields from raw VAPI report | — | Groq, router |
@@ -433,6 +437,7 @@ ${JSON.stringify(knowledgeBase, null, 2)}`,
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PORT=3000
 VAPI_SECRET=optional_webhook_secret_for_validation
+VAPI_API_KEY=
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -442,6 +447,7 @@ REDIS_URL=redis://localhost:6379
 GROQ_API_KEY=
 PORT=3000
 VAPI_SECRET=
+VAPI_API_KEY=
 REDIS_URL=redis://localhost:6379
 ```
 
@@ -535,7 +541,7 @@ services:
 
 - [ ] Push repo to GitHub
 - [ ] Create new Web Service on Render, connect repo
-- [ ] Set env vars (`GROQ_API_KEY`, `PORT=3000`) in Render dashboard
+- [ ] Set env vars (`GROQ_API_KEY`, `VAPI_SECRET`, `VAPI_API_KEY`, `REDIS_URL`, `PORT=3000`) in Render dashboard
 - [ ] Render auto-detects Dockerfile and builds
 - [ ] Copy public Render URL
 - [ ] Set as VAPI webhook URL: `https://your-app.onrender.com/vapi/webhook`
@@ -570,7 +576,7 @@ Step 1 — Scaffold & verify webhook receipt
 Step 2 — Wire state machine with hardcoded responses
   ✓ types/index.ts: CallState enum + LeadPayload interface
   ✓ router.ts: switch returning hardcoded strings
-  ✓ vapiController.ts: reads state, calls router, returns { result }
+  ✓ vapiController.ts: queues turns and the worker injects the spoken result
   ✓ VAPI talks back on call
 
 Step 3 — Add REDLINE detection

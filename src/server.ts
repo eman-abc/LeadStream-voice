@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 dotenv.config(); // Loads the .env file FIRST
 const express = require('express');
 const vapiRouter = require('./controllers/vapiController');
+const { initAsyncLlmQueue } = require("./services/asyncLlmQueue");
 const { initCallSessionStore } = require("./services/callSessionStore");
 const { initWebSocketServer, getEventStore } = require("./ws/broadcaster");
 const http = require("http");
@@ -54,7 +55,7 @@ app.get("/dashboard", (req, res) => {
 // Start server
 const httpServer = http.createServer(app);
 initWebSocketServer(httpServer);
-const ready = initCallSessionStore();
+const ready = initCallSessionStore().then(() => initAsyncLlmQueue());
 
 
 module.exports = { app, httpServer, ready };

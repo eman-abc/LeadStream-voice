@@ -5,10 +5,10 @@ const rateLimit = require("express-rate-limit");
 const Groq = require("groq-sdk");
 const fs = require("fs");
 const path = require("path");
-const { handleRouting: routingHandler } = require("../state-machine/router");
 const { CallState: CallStateMap } = require("../types");
-const { parseEndOfCallReport, extractName, extractEmail } = require("../services/leadParser");
+const { parseEndOfCallReport } = require("../services/leadParser");
 const { dispatchLead } = require("../services/crmMock");
+const { extractControlUrl, queueLlmTurn } = require("../services/asyncLlmQueue");
 const { getCallSessionStore } = require("../services/callSessionStore");
 const { pushEvent } = require("../ws/broadcaster");
 const logger = require("../utils/logger");
@@ -44,6 +44,28 @@ async function cleanUpSession(callId) {
     logger.info("Session cleaned up", { callId });
 }
 
+function getToolTranscript(message) {
+    const rawArgs = message.toolCallList?.[0]?.function?.arguments ||
+        message.toolWithToolCallList?.[0]?.toolCall?.function?.arguments;
+
+    if (typeof rawArgs === "string") {
+        const parsedArgs = JSON.parse(rawArgs);
+        return parsedArgs.Transcript || parsedArgs.transcript || parsedArgs.message || parsedArgs.input || "";
+    }
+
+    if (rawArgs) {
+        return rawArgs.Transcript || rawArgs.transcript || rawArgs.message || rawArgs.input || "";
+    }
+
+    return "";
+}
+
+function getToolCallId(message) {
+    return message.toolCallList?.[0]?.id ||
+        message.toolWithToolCallList?.[0]?.toolCall?.id ||
+        "unknown";
+}
+
 router.post("/webhook", async (req, res) => {
     const incomingSecret = req.headers["x-vapi-secret"];
     if (VAPI_SECRET && incomingSecret !== VAPI_SECRET) {
@@ -60,6 +82,11 @@ router.post("/webhook", async (req, res) => {
     const messageType = message.type || body.type || "";
     const callId = body.call?.id || message.call?.id || body.callId || "default";
     const sessionStore = await getCallSessionStore();
+    const controlUrl = extractControlUrl(message.call || body.call);
+
+    if (controlUrl) {
+        await sessionStore.setControlUrl(callId, controlUrl);
+    }
 
     if (PASSTHROUGH_EVENTS.has(messageType)) {
         return res.status(200).json({ received: true });
@@ -170,91 +197,34 @@ router.post("/webhook", async (req, res) => {
 
     if (messageType === "tool-calls") {
         try {
-            let transcript = "";
-            const rawArgs = message.toolCallList?.[0]?.function?.arguments ||
-                message.toolWithToolCallList?.[0]?.toolCall?.function?.arguments;
-
-            if (typeof rawArgs === "string") {
-                const parsedArgs = JSON.parse(rawArgs);
-                transcript = parsedArgs.Transcript || parsedArgs.transcript || parsedArgs.message || parsedArgs.input || "";
-            } else if (rawArgs) {
-                transcript = rawArgs.Transcript || rawArgs.transcript || rawArgs.message || rawArgs.input || "";
-            }
-
-            const toolCallId = message.toolCallList?.[0]?.id ||
-                message.toolWithToolCallList?.[0]?.toolCall?.id || "unknown";
-
+            const transcript = getToolTranscript(message);
+            const toolCallId = getToolCallId(message);
             const acceptedToolCall = await sessionStore.markToolCallProcessed(callId, toolCallId);
+
             if (!acceptedToolCall) {
                 logger.warn("Duplicate tool-call detected", { callId, toolCallId });
-                return res.status(200).json({ results: [{ toolCallId, result: "" }] });
-            }
-
-            if (!transcript.trim()) {
-                logger.info("Empty transcript - asking to repeat", { callId });
-                return res.status(200).json({
-                    results: [{ toolCallId, result: "I didn't quite catch that. Could you repeat it?" }],
+                return res.status(202).json({
+                    received: true,
+                    queued: false,
+                    duplicate: true,
+                    results: [{ toolCallId, result: "" }],
                 });
             }
 
-            const [lastResponse, currentState, entities] = await Promise.all([
-                sessionStore.getLastResponse(callId),
-                sessionStore.getCallState(callId),
-                sessionStore.getEntities(callId),
-            ]);
-
-            const normalizedTranscript = transcript.toLowerCase().trim();
-            const normalizedLast = lastResponse.toLowerCase().trim();
-            if (normalizedLast && (
-                normalizedLast === normalizedTranscript ||
-                (normalizedLast.includes(normalizedTranscript) && normalizedTranscript.length > 20)
-            )) {
-                logger.warn("Echo/duplicate detected - skipping routing", { callId, transcript });
-                return res.status(200).json({ results: [{ toolCallId, result: "" }] });
-            }
-
-            const detectedName = extractName(transcript);
-            const detectedEmail = extractEmail(transcript);
-            if (detectedName !== "Unknown") entities.name = detectedName;
-            if (detectedEmail) entities.email = detectedEmail;
-            await sessionStore.setEntities(callId, entities);
-
-            const conversationHistory = await sessionStore.appendHistory(callId, { role: "user", content: transcript });
-            const fromState = currentState || CallStateMap.GREETING;
-            logger.info("Routing through state machine", { callId, fromState, transcript });
-
-            const result = await routingHandler(transcript, fromState, entities, conversationHistory);
-
-            await Promise.all([
-                sessionStore.setCallState(callId, result.nextState),
-                sessionStore.setLastResponse(callId, result.content),
-                sessionStore.appendHistory(callId, { role: "bot", content: result.content }),
-            ]);
-
-            pushEvent(callId, result.redlined ? "REDLINE" : "TURN", {
-                transcript,
-                response: result.content,
-                fromState,
-                toState: result.nextState,
-                redlined: result.redlined,
-            });
-
-            pushEvent(callId, "BOT_RESPONSE", {
-                transcript: result.content,
-                state: result.nextState,
-            });
-
-            logger.info("Brain response complete", {
+            await queueLlmTurn({
                 callId,
-                nextState: result.nextState,
-                redlined: result.redlined,
+                toolCallId,
+                transcript,
+                controlUrl,
             });
 
-            return res.status(200).json({
-                results: [{ toolCallId, result: result.content }],
+            return res.status(202).json({
+                received: true,
+                queued: true,
+                results: [{ toolCallId, result: "" }],
             });
         } catch (err) {
-            logger.error("Brain routing critical failure", { callId, error: err.stack });
+            logger.error("Async queueing failure", { callId, error: err.stack });
             return res.status(200).json({
                 results: [{
                     toolCallId: "fallback",

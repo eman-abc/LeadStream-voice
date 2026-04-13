@@ -38,7 +38,7 @@ describe("POST /vapi/webhook — passthrough events", () => {
 });
 
 describe("POST /vapi/webhook — tool-calls", () => {
-    it("returns results array with toolCallId for clean query", async () => {
+    it("acks quickly and queues a clean query", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
             .set("x-vapi-secret", "secure_assistant")
@@ -50,21 +50,21 @@ describe("POST /vapi/webhook — tool-calls", () => {
                         id: "tc-abc-123",
                         function: {
                             name: "route_message",
-                            arguments: { transcript: "Tell me about DinoScan" }
+                            arguments: { transcript: "I want to book a demo" }
                         }
                     }]
                 }
             })
-            .expect(200);
+            .expect(202);
 
-        expect(res.body.results).toBeDefined();
+        expect(res.body.received).toBe(true);
+        expect(res.body.queued).toBe(true);
         expect(Array.isArray(res.body.results)).toBe(true);
         expect(res.body.results[0].toolCallId).toBe("tc-abc-123");
-        expect(typeof res.body.results[0].result).toBe("string");
-        expect(res.body.results[0].result.length).toBeGreaterThan(0);
+        expect(res.body.results[0].result).toBe("");
     });
 
-    it("returns redline response for sensitive keyword", async () => {
+    it("queues a redline request instead of blocking the webhook", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
             .set("x-vapi-secret", "secure_assistant")
@@ -81,12 +81,14 @@ describe("POST /vapi/webhook — tool-calls", () => {
                     }]
                 }
             })
-            .expect(200);
+            .expect(202);
 
-        expect(res.body.results[0].result).toMatch(/not able to discuss/i);
+        expect(res.body.received).toBe(true);
+        expect(res.body.queued).toBe(true);
+        expect(res.body.results[0].result).toBe("");
     });
 
-    it("handles missing transcript gracefully", async () => {
+    it("queues even when the transcript is missing", async () => {
         const res = await request(app)
             .post("/vapi/webhook")
             .set("x-vapi-secret", "secure_assistant")
@@ -100,10 +102,11 @@ describe("POST /vapi/webhook — tool-calls", () => {
                     }]
                 }
             })
-            .expect(200);
+            .expect(202);
 
-        expect(res.body.results).toBeDefined();
-        expect(typeof res.body.results[0].result).toBe("string");
+        expect(res.body.received).toBe(true);
+        expect(res.body.queued).toBe(true);
+        expect(res.body.results[0].result).toBe("");
     });
 });
 

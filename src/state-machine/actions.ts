@@ -6,6 +6,15 @@ const { knowledgeBase } = require("../data/knowledgeLoader");
 // Stop sequences — max 4 limits for Groq API
 const STOP_SEQUENCES = ["\nUser:", "\nCaller:", "User:", "\n\n"];
 
+function logGroq(message, error = false) {
+    if (process.env.NODE_ENV === "test") return;
+    if (error) {
+        console.error(message);
+        return;
+    }
+    console.log(message);
+}
+
 /**
  * buildSystemPrompt — clean, priority-ordered rules.
  * Fewer rules = better compliance from small models.
@@ -112,12 +121,12 @@ async function queryGroq(transcript, history, context) {
             .trim();
 
         const latency = Date.now() - startTime;
-        console.log(`[GROQ] ${latency}ms | context=${boundedHistory.length} turns | "${response}"`);
+        logGroq(`[GROQ] ${latency}ms | context=${boundedHistory.length} turns | "${response}"`);
 
         return response;
 
     } catch (err) {
-        console.error(`[GROQ] Error:`, err.message);
+        logGroq(`[GROQ] Error: ${err.message}`, true);
         return "I'm having a little trouble right now — could I take your details and have someone call you back?";
     }
 }
