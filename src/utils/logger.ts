@@ -63,4 +63,12 @@ const logger = winston.createLogger({
     ],
 });
 
+// ── Compatibility shim ────────────────────────────────────────────────────────
+// This ensures that both:
+//   const logger = require("./logger");
+//   const logger = require("./logger").default;
+// ...both work correctly in CommonJS.
+(logger as any).default = logger;
+
 export default logger;
+module.exports = logger;
