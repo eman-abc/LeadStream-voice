@@ -89,10 +89,11 @@ Redline responses bypass Groq entirely — those return in **< 100 ms**.
 - **Redline protection** — hardcoded keyword interception runs *before* the LLM is invoked; sensitive topics (investors, competitors, pricing discounts, etc.) are deflected without calling Groq.
 - **Groq-powered answers** — `llama-3.1-8b-instant` answers product/pricing questions grounded in a local JSON knowledge base.
 - **Post-call lead extraction** — a second Groq pass extracts customer name, email, and a 1-sentence call summary from the transcript.
+- **Redis-backed call sessions** — per-call state, entities, history, dedupe, and echo suppression survive deploys and allow multi-instance webhook handling.
 - **Disk persistence** — every call produces a `logs/<callId>.json` file that survives server restarts.
 - **Live dashboard** — `public/dashboard.html` receives push updates over WebSocket; shows call state, transcript turns, bot responses, and surfaced lead data.
 - **Rate limiting** — `express-rate-limit` on the `/vapi/webhook` endpoint.
-- **Session safety reaper** — in-memory sessions are automatically purged after 1 hour to prevent memory leaks on abandoned calls.
+- **TTL-based session cleanup** — Redis expires idle call sessions automatically after 2 hours.
 - **Duplicate call guard** — processed `toolCallId`s are deduplicated to prevent double-firing on VAPI retry.
 - **Echo suppression** — bot responses are never re-routed if they surface as the next transcript input.
 - **Structured logging** — Winston logger with timestamps on all INFO/WARN/ERROR events.
@@ -147,6 +148,7 @@ leadstream-voice/
     │   ├── router.ts           # switch(state) — the routing brain
     │   └── actions.ts          # Groq SDK call + prompt assembly
     ├── services/
+    │   ├── callSessionStore.ts  # Redis-backed per-call state store
     │   ├── leadParser.ts       # Extracts typed fields from VAPI transcript
     │   └── crmMock.ts          # Console-formatted CRM + WhatsApp simulation
     ├── ws/
@@ -176,10 +178,10 @@ leadstream-voice/
 3. VAPI POST /vapi/webhook  { type: "tool-calls", callId, transcript }
 4. vapiController.ts
    ├── Verify VAPI_SECRET header
-   ├── Deduplicate toolCallId
-   ├── Echo-suppress repeated transcript
-   ├── Inline entity extraction (name, email) → entityMap
-   ├── Append to conversationHistoryMap
+   ├── Deduplicate toolCallId via Redis NX key
+   ├── Echo-suppress repeated transcript via Redis last-response
+   ├── Inline entity extraction (name, email) → Redis `call:{callId}:entities`
+   ├── Append to Redis `call:{callId}:history`
    └── Call router.ts(state, transcript, entities, history)
 5. router.ts
    ├── REDLINE keyword check (runs FIRST, no Groq)
@@ -189,7 +191,7 @@ leadstream-voice/
          DATA_COLLECTION → data-collection prompt
          END_CALL        → closing script
 6. vapiController.ts
-   ├── Update callStateMap[callId]
+   ├── Update Redis `call:{callId}:state`
    ├── Push TURN / REDLINE event over WebSocket
    └── Return { results: [{ toolCallId, result: responseText }] }
 7. ElevenLabs (via VAPI) speaks response to caller
@@ -201,14 +203,14 @@ leadstream-voice/
 1. Caller hangs up
 2. VAPI POST /vapi/webhook  { type: "end-of-call-report" }
 3. vapiController.ts
-   ├── Reconstruct transcript from conversationHistoryMap
+   ├── Reconstruct transcript from Redis history
    ├── leadParser.ts → coarse LeadPayload (regex)
    ├── Groq extraction pass → clean name, email
    ├── Groq summary pass → 1-sentence technical summary
    ├── Write logs/<callId>.json to disk
    ├── crmMock.ts → console [CRM_SYNC] + [WHATSAPP_API] blocks
    ├── Push CALL_ENDED event over WebSocket
-   └── cleanUpSession(callId) → purge in-memory maps
+   └── cleanUpSession(callId) → delete Redis session keys
 ```
 
 ---
@@ -256,7 +258,7 @@ Any transcript containing one of these keywords triggers an immediate hardcoded 
 | `POST` | `/vapi/webhook` | Primary VAPI event receiver (tool-calls, assistant-request, end-of-call-report, etc.) |
 | `GET` | `/health` | Liveness probe — returns `{ status: "ok", service, ts }` |
 | `GET` | `/dashboard` | Serves `public/dashboard.html` |
-| `GET` | `/api/events` | HTTP fallback — returns full in-memory event store (for polling) |
+| `GET` | `/api/events` | HTTP fallback — returns the in-process dashboard event buffer (for polling) |
 | `GET` | `/` | Redirects to `/dashboard` |
 
 ### VAPI Webhook Event Handling
@@ -278,6 +280,7 @@ Any transcript containing one of these keywords triggers an immediate hardcoded 
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PORT=3000
 VAPI_SECRET=your_webhook_secret_here
+REDIS_URL=redis://localhost:6379
 ```
 
 ### `.env.example` (committed)
@@ -286,6 +289,7 @@ VAPI_SECRET=your_webhook_secret_here
 GROQ_API_KEY=
 PORT=3000
 VAPI_SECRET=
+REDIS_URL=redis://localhost:6379
 ```
 
 | Variable | Required | Description |
@@ -293,6 +297,7 @@ VAPI_SECRET=
 | `GROQ_API_KEY` | **Yes** | API key from [console.groq.com](https://console.groq.com) |
 | `PORT` | No | HTTP port; defaults to `3000` |
 | `VAPI_SECRET` | Recommended | Secret set in VAPI dashboard → Server URL headers; validated on every webhook |
+| `REDIS_URL` | **Yes** (except tests) | Redis connection string for durable call session storage |
 
 ---
 
@@ -301,6 +306,7 @@ VAPI_SECRET=
 ### Prerequisites
 
 - Node.js 20+
+- Redis 6+ or a managed Redis URL
 - A [VAPI](https://vapi.ai) account with an assistant configured
 - A [Groq](https://console.groq.com) API key
 - [Ngrok](https://ngrok.com) (for local webhook testing)
@@ -317,7 +323,7 @@ npm install
 
 ```bash
 cp .env.example .env
-# Edit .env — add GROQ_API_KEY and optionally VAPI_SECRET
+# Edit .env — add GROQ_API_KEY, REDIS_URL, and optionally VAPI_SECRET
 ```
 
 ### 3. Start the dev server
@@ -390,6 +396,7 @@ docker build -t leadstream-voice .
 docker run -p 3000:3000 \
   -e GROQ_API_KEY=gsk_xxx \
   -e VAPI_SECRET=your_secret \
+  -e REDIS_URL=redis://host.docker.internal:6379 \
   leadstream-voice
 ```
 
@@ -401,7 +408,7 @@ The Dockerfile uses a multi-stage build:
 
 - [ ] Push repo to GitHub
 - [ ] Create new **Web Service** on [Render](https://render.com) → connect repo
-- [ ] Set env vars in Render dashboard: `GROQ_API_KEY`, `VAPI_SECRET`, `PORT=3000`
+- [ ] Set env vars in Render dashboard: `GROQ_API_KEY`, `VAPI_SECRET`, `REDIS_URL`, `PORT=3000`
 - [ ] Render auto-detects Dockerfile and builds
 - [ ] Copy your public Render URL (e.g. `https://leadstream-voice.onrender.com`)
 - [ ] Update VAPI Server URL to `https://leadstream-voice.onrender.com/vapi/webhook`
@@ -430,7 +437,7 @@ The server broadcasts events over WebSocket to all connected dashboard clients. 
 | `BOT_RESPONSE` | After every routed turn | `transcript` (bot text), `state` |
 | `CALL_ENDED` | `end-of-call-report` processed | `lead` (LeadPayload), `summary` |
 
-Event history is held in-memory (`getEventStore()`) and also available via `GET /api/events` for clients that connect after a call started.
+Event history is buffered in-process for fast fanout, persisted asynchronously to `logs/events.json`, and also available via `GET /api/events` for clients that connect after a call started.
 
 ---
 
@@ -440,8 +447,8 @@ Event history is held in-memory (`getEventStore()`) and also available via `GET 
 |---|---|
 | Webhook authentication | `x-vapi-secret` header compared against `VAPI_SECRET` env var on every request |
 | Rate limiting | 100 requests / 15-minute window per IP on `/vapi/webhook` via `express-rate-limit` |
-| Tool-call deduplication | `processedToolCalls` Set prevents replay of the same `toolCallId` |
-| Session expiry | Safety reaper timer auto-purges sessions after 1 hour |
+| Tool-call deduplication | Redis `NX` keys prevent replay of the same `toolCallId` across instances |
+| Session expiry | Redis TTL auto-expires per-call state after 2 hours |
 | Trust proxy | `app.set('trust proxy', 1)` ensures correct IP detection behind Render/Nginx |
 | No secrets in repo | `.env` is git-ignored; `.env.example` never contains values |
 
@@ -453,7 +460,7 @@ The current architecture is intentionally designed so each of the following is a
 
 | Current (MVP) | Production upgrade |
 |---|---|
-| In-memory `callStateMap` | Redis (multi-instance safe) |
+| Redis call session keys | PostgreSQL / DynamoDB event sourcing |
 | `logs/<callId>.json` on disk | PostgreSQL / DynamoDB |
 | `crmMock.ts` console output | HubSpot API via queue (BullMQ + Redis) |
 | `[WHATSAPP_API]` log line | Twilio WhatsApp Business API |

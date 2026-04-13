@@ -7,9 +7,13 @@ const request = require("supertest");
 // if not already present: module.exports = { app };
 
 let app;
+let ready;
 
-beforeAll(() => {
-    app = require("../../src/server").app;
+beforeAll(async () => {
+    const serverModule = require("../../src/server");
+    app = serverModule.app;
+    ready = serverModule.ready;
+    await ready;
 });
 
 describe("POST /vapi/webhook — passthrough events", () => {

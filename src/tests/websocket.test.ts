@@ -3,23 +3,26 @@
 require("dotenv").config();
 const request = require("supertest");
 const WebSocket = require("ws");
-const { app, httpServer } = require("../../src/server");
+const { app, httpServer, ready } = require("../../src/server");
 
 let wsClient;
 let port;
 let receivedMessages = [];
 
 beforeAll((done) => {
-    // Start the http server on a random available port
-    httpServer.listen(0, () => {
-        port = httpServer.address().port;
-        done();
-    });
+    ready.then(() => {
+        httpServer.listen(0, () => {
+            port = httpServer.address().port;
+            done();
+        });
+    }).catch(done);
 });
 
 afterAll((done) => {
     if (wsClient) {
+        wsClient.once("close", () => httpServer.close(done));
         wsClient.close();
+        return;
     }
     httpServer.close(done);
 });

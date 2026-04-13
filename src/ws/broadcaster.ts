@@ -7,6 +7,12 @@ const path = require("path");
 const LOGS_DIR = path.join(__dirname, "../../logs");
 const EVENTS_FILE = path.join(LOGS_DIR, "events.json");
 
+function logWs(message) {
+    if (process.env.NODE_ENV !== "test") {
+        console.log(message);
+    }
+}
+
 // Ensure logs dir exists
 if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
 
@@ -16,13 +22,16 @@ if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
  */
 let eventStore = [];
 let eventCounter = 0;
+let persistScheduled = false;
+let persistInFlight = false;
+let persistDirty = false;
 
 // Load persisted events from disk on boot
 try {
     if (fs.existsSync(EVENTS_FILE)) {
         eventStore = JSON.parse(fs.readFileSync(EVENTS_FILE, "utf-8"));
         eventCounter = eventStore.length;
-        console.log(`[WS] Loaded ${eventStore.length} persisted events from disk.`);
+        logWs(`[WS] Loaded ${eventStore.length} persisted events from disk.`);
     }
 } catch (e) {
     console.warn("[WS] Could not load persisted events, starting fresh:", e.message);
@@ -45,7 +54,7 @@ function initWebSocketServer(httpServer) {
 
     wss.on("connection", (ws) => {
         clients.add(ws);
-        console.log(`[WS] Client connected. Total: ${clients.size}`);
+        logWs(`[WS] Client connected. Total: ${clients.size}`);
 
         // Send full event history to new client immediately
         // This means opening the dashboard mid-session shows all past events
@@ -56,7 +65,7 @@ function initWebSocketServer(httpServer) {
 
         ws.on("close", () => {
             clients.delete(ws);
-            console.log(`[WS] Client disconnected. Total: ${clients.size}`);
+            logWs(`[WS] Client disconnected. Total: ${clients.size}`);
         });
 
         ws.on("error", (err) => {
@@ -65,7 +74,30 @@ function initWebSocketServer(httpServer) {
         });
     });
 
-    console.log("[WS] WebSocket server attached to HTTP server");
+    logWs("[WS] WebSocket server attached to HTTP server");
+}
+
+function schedulePersist() {
+    persistDirty = true;
+    if (persistScheduled) return;
+
+    persistScheduled = true;
+    setImmediate(async () => {
+        persistScheduled = false;
+        if (persistInFlight || !persistDirty) return;
+
+        persistDirty = false;
+        persistInFlight = true;
+
+        try {
+            await fs.promises.writeFile(EVENTS_FILE, JSON.stringify(eventStore), "utf-8");
+        } catch (error) {
+            console.warn("[WS] Failed to persist events:", error.message);
+        } finally {
+            persistInFlight = false;
+            if (persistDirty) schedulePersist();
+        }
+    });
 }
 
 /**
@@ -90,10 +122,8 @@ function pushEvent(callId, type, data) {
     // Keep store bounded — last 500 events max
     if (eventStore.length > 500) eventStore.shift();
 
-    // Persist to disk — survives server restarts
-    try {
-        fs.writeFileSync(EVENTS_FILE, JSON.stringify(eventStore), "utf-8");
-    } catch (e) { /* non-fatal */ }
+    // Persist to disk off the hot path so webhook responses stay non-blocking.
+    schedulePersist();
 
     // Broadcast to all live browser clients
     const message = JSON.stringify({ type: "EVENT", event });
@@ -104,7 +134,7 @@ function pushEvent(callId, type, data) {
         }
     });
 
-    console.log(`[WS] Pushed ${type} for call ${callId.slice(0, 8)}...`);
+    logWs(`[WS] Pushed ${type} for call ${callId.slice(0, 8)}...`);
 }
 
 /**

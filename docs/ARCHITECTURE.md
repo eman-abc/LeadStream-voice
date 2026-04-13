@@ -88,6 +88,7 @@ cvision-triage-native/
     │   ├── router.ts             # switch(state) — THE brain
     │   └── actions.ts            # Groq SDK call, prompt assembly
     ├── services/
+    │   ├── callSessionStore.ts   # Redis-backed per-call state store
     │   ├── leadParser.ts         # Extracts typed fields from VAPI transcript
     │   └── crmMock.ts            # Console-formatted CRM + WhatsApp simulation
     └── data/
@@ -183,7 +184,8 @@ export interface LeadPayload {
         │
         ▼
 4. vapiController.ts receives request
-   - Reads current CallState from in-memory map (keyed by callId)
+   - Reads current CallState from Redis (`call:{callId}:state`)
+   - Loads entities/history from Redis (`call:{callId}:entities`, `call:{callId}:history`)
    - Calls router.ts with (state, transcript)
         │
         ▼
@@ -413,7 +415,7 @@ ${JSON.stringify(knowledgeBase, null, 2)}`,
 | File | Single responsibility | Calls | Never calls |
 |---|---|---|---|
 | `server.ts` | Express init, mount routes | — | Business logic |
-| `vapiController.ts` | Parse VAPI webhook, manage callId→state map | `router.ts`, `leadParser.ts`, `crmMock.ts` | Groq, knowledge.json |
+| `vapiController.ts` | Parse VAPI webhook, orchestrate Redis-backed call session state | `router.ts`, `leadParser.ts`, `crmMock.ts`, `callSessionStore.ts` | Groq, knowledge.json |
 | `router.ts` | Evaluate state + transcript → response + nextState | `actions.ts` | HTTP layer |
 | `actions.ts` | Groq API call + prompt assembly | Groq SDK | State machine |
 | `leadParser.ts` | Extract typed fields from raw VAPI report | — | Groq, router |
@@ -431,6 +433,7 @@ ${JSON.stringify(knowledgeBase, null, 2)}`,
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PORT=3000
 VAPI_SECRET=optional_webhook_secret_for_validation
+REDIS_URL=redis://localhost:6379
 ```
 
 ### `.env.example` (committed)
@@ -439,6 +442,7 @@ VAPI_SECRET=optional_webhook_secret_for_validation
 GROQ_API_KEY=
 PORT=3000
 VAPI_SECRET=
+REDIS_URL=redis://localhost:6379
 ```
 
 ### `tsconfig.json`
@@ -617,4 +621,4 @@ These are the architectural decisions worth explaining if Faras asks "why did yo
 > "The builder stage compiles TypeScript. The production stage copies only the compiled JS and production dependencies — no `devDependencies`, no source files, no TypeScript compiler. The final image is about 180MB instead of 600MB."
 
 **What would you add in production?**
-> "In-memory state map → Redis (for multi-instance deployments). Mock CRM logs → real HubSpot API via a queue. Console WhatsApp → Twilio WhatsApp Business API. Ngrok → Render with a custom domain and SSL termination. The architecture supports all of these without structural changes — just swap the service implementations."
+> "We already moved live call session state into Redis with TTL-backed keys, so the app is stateless across deploys and horizontal scaling. The next production swaps are mock CRM logs → real HubSpot API via a queue, console WhatsApp → Twilio WhatsApp Business API, and Ngrok → Render with a custom domain and SSL termination."

@@ -92,7 +92,7 @@ function wasRedlined(transcript) {
 /**
  * parseEndOfCallReport — main export. Converts raw VAPI report into LeadPayload.
  * @param {any} reportBody - req.body from the end-of-call-report webhook
- * @param {string} [historyTranscript] - In-memory conversation history from controller
+ * @param {string} [historyTranscript] - Stored conversation history from controller
  * @returns {LeadPayload}
  */
 function parseEndOfCallReport(reportBody, historyTranscript) {
@@ -109,7 +109,7 @@ function parseEndOfCallReport(reportBody, historyTranscript) {
             .join(" ");
     }
 
-    // Prefer the in-memory history (has name/email from turn 1) over the artifact.
+    // Prefer the stored turn history (has name/email from turn 1) over the artifact.
     // Merge both so entities mentioned anywhere in the call are captured.
     const fullTranscript = [historyTranscript || "", artifactTranscript]
         .filter(Boolean)

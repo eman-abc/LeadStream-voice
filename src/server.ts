@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 dotenv.config(); // Loads the .env file FIRST
 const express = require('express');
 const vapiRouter = require('./controllers/vapiController');
+const { initCallSessionStore } = require("./services/callSessionStore");
 const { initWebSocketServer, getEventStore } = require("./ws/broadcaster");
 const http = require("http");
 const path = require("path");
@@ -53,14 +54,22 @@ app.get("/dashboard", (req, res) => {
 // Start server
 const httpServer = http.createServer(app);
 initWebSocketServer(httpServer);
+const ready = initCallSessionStore();
 
 
-module.exports = { app, httpServer };
+module.exports = { app, httpServer, ready };
 
 if (process.env.NODE_ENV !== 'test') {
-    httpServer.listen(PORT, () => {
-        console.log(`✓ Dino Triage Platform listening on port ${PORT}`);
-        console.log(`✓ Webhook endpoint: POST http://localhost:${PORT}/vapi/webhook`);
-        console.log(`✓ Dashboard: http://localhost:${PORT}/dashboard`);
-    });
+    ready
+        .then(() => {
+            httpServer.listen(PORT, () => {
+                console.log(`✓ Dino Triage Platform listening on port ${PORT}`);
+                console.log(`✓ Webhook endpoint: POST http://localhost:${PORT}/vapi/webhook`);
+                console.log(`✓ Dashboard: http://localhost:${PORT}/dashboard`);
+            });
+        })
+        .catch((error) => {
+            console.error("[BOOT] Failed to initialize call session store:", error.message);
+            process.exit(1);
+        });
 }
